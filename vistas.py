@@ -1,24 +1,23 @@
-#
-# Proyecta una nube de puntos 3D en sus proyecciones
-#
-
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib import collections as mc
 import math
+
+from matplotlib import pyplot as plt
+from matplotlib import collections as mc
 from scipy.spatial import Delaunay, ConvexHull
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+from itertools import product
+
+from graph import Graph, Vertex
 
 
 class Projection:
     """Orthogonal projection of a point cloud"""
 
-    def __init__(self, points: np.ndarray, edges: np.ndarray, normal: np.ndarray, name: str, index_map=None):
+    def __init__(self, points: np.ndarray, edges: np.ndarray, normal: np.ndarray, name: str):
         self.points = points
         self.edges = edges
         self.normal = normal
         self.name = name
-        self.index_map = index_map
 
     def __repr__(self):
         return f'Project(\n\t{repr(self.points)},\n\t{repr(self.edges)},\n\t{repr(self.normal)},\n\t{repr(self.name)}\n)'
@@ -32,20 +31,11 @@ def project_cloud_axis(points: np.ndarray, edges: np.ndarray, axis: int, name: s
     # Project points
     projection = points[:, mask]
 
-    # Remove duplicates and sort
-    # projection, index_map = np.unique(projection, axis=0, return_inverse=True)
-    index_map = None
-
-    # Remap indices and remove invisible ones
-    # remapped_edges = np.unique(np.sort(index_map[edges], axis=1), axis=0)
-    # visible_edges = remapped_edges[remapped_edges[:, 0] != remapped_edges[:, 1]]
-    visible_edges = edges
-
     # Normal to the projection plane
     normal = np.zeros((1, 3))
     normal[0, axis] = 1
 
-    return Projection(projection, visible_edges, normal, name, index_map=index_map)
+    return Projection(projection, edges, normal, name)
 
 
 def project_cloud(points: np.ndarray, edges: np.ndarray):
@@ -113,7 +103,6 @@ def plot_3d_model(points, edges):
     ax.set_ylabel('Y')
     ax.set_zlabel('Z')
     ax.set_title('Modelo 3D Reconstruido')
-
     plt.show()
 
     return fig
@@ -132,20 +121,15 @@ def plot_3d_mesh(points, faces):
 
     # Construir la malla a partir de las caras
     mesh = [points[list(face)] for face in faces]
-    poly3d = Poly3DCollection(mesh, facecolors='blue', alpha=0.3, edgecolors='none')
+    poly3d = Poly3DCollection(mesh, facecolors='cyan', alpha=0.5, edgecolors='k')
     ax.add_collection3d(poly3d)
 
-    # Extraer y dibujar los bordes de la malla
-    boundary_edges = extract_edges(faces)
-    for edge in boundary_edges:
-        p1 = points[edge[0]]
-        p2 = points[edge[1]]
-        ax.plot([p1[0], p2[0]], [p1[1], p2[1]], [p1[2], p2[2]], color='k', linewidth=2)
+    ax.scatter(points[:, 0], points[:, 1], points[:, 2], c='r', marker='o')
 
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_zlabel('Z')
-    ax.set_title('Modelo 3D Delaunay')
+    ax.set_title('Malla 3D Reconstruida')
 
     plt.show()
 
@@ -173,9 +157,9 @@ def extract_edges(faces):
     return boundary_edges
 
 
-def reconstruct_3d_from_projections(plan_proj, elevation_proj, section_proj, orig_edges, epsilon=1e-6):
+def reconstruct_points_3d(plan_proj, elevation_proj, section_proj, tolerance=1e-2):
     """
-    Reconstruye el modelo 3D a partir de las proyecciones ortogonales.
+    Reconstruye los puntos del modelo 3D a partir de las proyecciones ortogonales.
 
     Para cada punto de la proyección de alzado se buscan candidatos en las otras proyecciones
     que tengan coordenadas compatibles y se reconstruye la coordenada Z promediando los valores
@@ -184,94 +168,123 @@ def reconstruct_3d_from_projections(plan_proj, elevation_proj, section_proj, ori
     :param plan_proj: Proyección en el plano XZ. (planta)
     :param elevation_proj: Proyección en el plano XY. (alzado)
     :param section_proj: Proyección en el plano YZ. (perfil)
-    :param orig_edges: Aristas originales de la nube de puntos 3D.
-    :param epsilon: Tolerancia para la comparación de coordenadas.
-    :return: Tupla de puntos 3D reconstruidos y aristas correspondientes.
+    :param tolerance: Tolerancia para la comparación de coordenadas.
+    :return: Array de puntos 3D reconstruidos del modelo.
     """
 
-    points_3d = []  # Lista para almacenar los puntos 3D reconstruidos
-    mapping = {}  # Mapea el índice de la proyección de alzado al índice en points_3d
-
-    # Conjuntos para evitar reutilizar el mismo punto candidato en otras proyecciones
-    used_plan = set()
-    used_section = set()
+    matches = []  # Lista para almacenar las coincidencias
 
     # Para cada punto en la proyección de alzado (XY)
     for i, (x_elevation, y_elevation) in enumerate(elevation_proj.points):
         # Buscar candidatos en la proyección de planta que tengan una X similar
         candidates_plan = [
             j for j, (x_plan, z_plan) in enumerate(plan_proj.points)
-            if abs(x_plan - x_elevation) < epsilon and j not in used_plan
+            if abs(x_plan - x_elevation) < tolerance
         ]
 
         # Buscar candidatos en la proyección de perfil que tengan una Y similar
         candidates_section = [
             k for k, (y_section, z_section) in enumerate(section_proj.points)
-            if abs(y_section - y_elevation) < epsilon and k not in used_section
+            if abs(y_section - y_elevation) < tolerance
         ]
 
         if not candidates_plan or not candidates_section:
             print(f"No se encontraron candidatos para el punto alzado {i}: ({x_elevation}, {y_elevation})")
             continue
 
-        # En caso de múltiples candidatos, se selecciona el que minimice la diferencia
-        j = min(candidates_plan, key=lambda idx: abs(plan_proj.points[idx][0] - x_elevation))
-        k = min(candidates_section, key=lambda idx: abs(section_proj.points[idx][0] - y_elevation))
-
         # Obtener la coordenada Z de ambas proyecciones
-        z_plan = plan_proj.points[j][1]
-        z_section = section_proj.points[k][1]
-        if abs(z_plan - z_section) > epsilon:
-            print(f"Inconsistencia en Z para el punto alzado {i}: {z_plan} - {z_section}")
-            continue
+        for j in candidates_plan:
+            x_plan, z_plan = plan_proj.points[j]
+            for k in candidates_section:
+                y_section, z_section = section_proj.points[k]
+                if abs(z_plan - z_section) < tolerance:
+                    # Reconstruir el punto 3D (x, y, z), donde z es el promedio de los dos valores
+                    z = (z_plan + z_section) / 2.0
+                    matches.append((x_elevation, y_elevation, z))
 
-        # Reconstruir el punto 3D (x, y, z), donde z es el promedio de los dos valores
-        z = (z_plan + z_section) / 2.0
-        points_3d.append([x_elevation, y_elevation, z])
-        mapping[i] = len(points_3d) - 1
-        used_plan.add(j)
-        used_section.add(k)
+    unique_points = {}
 
-    points_3d = np.array(points_3d)
+    for (x, y, z) in matches:
+        key = (round(x / tolerance), round(y / tolerance), round(z / tolerance))
 
-    # Reconstruir las aristas
-    edges_3d = []
-    for (i, j) in orig_edges:
-        if i in mapping and j in mapping and mapping[i] != mapping[j]:
-            edges_3d.append(tuple(sorted((mapping[i], mapping[j]))))
+        if key not in unique_points:
+            unique_points[key] = (x, y, z)
 
-    # Eliminar aristas duplicadas
-    edges_3d = np.array(list(set(edges_3d)))
+    points_3d = np.array(list(unique_points.values()), dtype=np.float32)
 
-    return points_3d, edges_3d
+    return points_3d
 
 
-def reconstruct_mesh(points, epsilon=1e-6):
+def reconstruct_edges_3d(points_3d, plan_proj, elevation_proj, section_proj, tolerance=1e-2):
     """
-    Reconstruye una malla a partir de la nube de puntos 3D.
+    Reconstruye las aristas del modelo 3D a partir de las proyecciones ortogonales.
 
-    Se utiliza 'Convex Hull' si la nube tiene al menos 4 puntos y las varianzas en cada dimensión
-    son significativas. En otro caso, se proyecta a 2D usando las dos dimensiones con mayor
-    varianza y se aplica 'Delaunay'.
+    Para cada arista se debe cumplir que su proyección en cada vista corresponda a una arista 2D
+    existente o converja en un único punto.
 
-    :param points: Matriz de puntos 3D.
-    :param epsilon: Tolerancia para considerar varianza significativa.
-    :return:
-        - faces: Conjunto de caras (índices) que forman la malla.
+    :param points_3d: Array de puntos 3D.
+    :param plan_proj: Proyección en el plano XZ. (planta)
+    :param elevation_proj: Proyección en el plano XY. (alzado)
+    :param section_proj: Proyección en el plano YZ. (perfil)
+    :param tolerance: Tolerancia para la comparación de coordenadas.
+    :return: Array de aristas 3D reconstruidos del modelo.
     """
+    plan_unique = {tuple(sorted(edge)) for edge in plan_proj.edges}
+    elevation_unique = {tuple(sorted(edge)) for edge in elevation_proj.edges}
+    section_unique = {tuple(sorted(edge)) for edge in section_proj.edges}
 
-    if points.shape[0] >= 4 and np.std(points, axis=0).min() >= epsilon:
-        hull = ConvexHull(points)
-        faces = hull.simplices
-        return faces
-    else:
-        # Proyectar a 2D usando las dos dimensiones con mayor varianza
-        variances = np.var(points, axis=0)
-        dims = np.argsort(variances)[-2:]
-        points_2d = points[:, dims]
-        tri = Delaunay(points_2d)
-        faces = tri.simplices
-        return faces
+    plan_index_map = {}
+    elevation_index_map = {}
+    section_index_map = {}
+
+    for index_3d, point_3d in enumerate(points_3d):
+        # Proyección en el plano XZ (planta)
+        point_2d_plan = point_3d[[0, 2]]
+        for index_2d, point_2d in enumerate(plan_proj.points):
+            if np.linalg.norm(point_2d - point_2d_plan) < tolerance:
+                plan_index_map[index_3d] = index_2d
+                break
+
+        # Proyección en el plano XY (alzado)
+        point_2d_elevation = point_3d[[0, 1]]
+        for index_2d, point_2d in enumerate(elevation_proj.points):
+            if np.linalg.norm(point_2d - point_2d_elevation) < tolerance:
+                elevation_index_map[index_3d] = index_2d
+                break
+
+        # Proyección en el plano YZ (perfil)
+        point_2d_section = point_3d[[1, 2]]
+        for index_2d, point_2d in enumerate(section_proj.points):
+            if np.linalg.norm(point_2d - point_2d_section) < tolerance:
+                section_index_map[index_3d] = index_2d
+                break
+
+    edges_3d = set()
+    n_points = len(points_3d)
+
+    # Comprobar todas las posibles parejas de vértices para formar aristas
+    for u in range(n_points):
+        for v in range(u + 1, n_points):
+            # Comprobar que ambos puntos se mapearon correctamente en todas las vistas
+            if not all(p in plan_index_map for p in (u, v)) or \
+                    not all(p in elevation_index_map for p in (u, v)) or \
+                    not all(p in section_index_map for p in (u, v)):
+                continue
+
+            # Obtener los índices 2D
+            i_plan, j_plan = plan_index_map[u], plan_index_map[v]
+            i_elev, j_elev = elevation_index_map[u], elevation_index_map[v]
+            i_section, j_section = section_index_map[u], section_index_map[v]
+
+            # Comprobar si la proyección es un borde o un punto en cada vista
+            plan_valid = (i_plan == j_plan) or (tuple(sorted((i_plan, j_plan))) in plan_unique)
+            elevation_valid = (i_elev == j_elev) or (tuple(sorted((i_elev, j_elev))) in elevation_unique)
+            section_valid = (i_section == j_section) or (tuple(sorted((i_section, j_section))) in section_unique)
+
+            if plan_valid and elevation_valid and section_valid:
+                edges_3d.add(tuple(sorted((u, v))))
+
+    return np.array(list(edges_3d), dtype=int)
 
 
 def check_projection_connectivity(projections):
@@ -322,6 +335,8 @@ def check_model_consistency(points, edges):
         - bool: True si el modelo es consistente.
                 False en caso contrario.
     """
+    if edges is None or len(edges) == 0:
+        return True
 
     if len(points) < 3:
         return False
@@ -339,7 +354,7 @@ def check_model_consistency(points, edges):
     return True
 
 
-def check_projection_consistency(plan_proj, elevation_proj, section_proj, orig_edges, epsilon=1e-6):
+def check_projection_consistency(plan_proj, elevation_proj, section_proj, tolerance=1e-2):
     """
     Comprueba que las proyecciones sean consistentes entre sí y con el modelo 3D reconstruido.
 
@@ -353,8 +368,7 @@ def check_projection_consistency(plan_proj, elevation_proj, section_proj, orig_e
     :param plan_proj: Proyección en el plano XZ. (planta)
     :param elevation_proj: Proyección en el plano XY. (alzado)
     :param section_proj: Proyección en el plano YZ. (perfil)
-    :param orig_edges: Aristas originales de la nube de puntos 3D.
-    :param epsilon: Tolerancia para la comparación de coordenadas.
+    :param tolerance: Tolerancia para la comparación de coordenadas.
     :return:
         - bool: True si se cumplen todas las comprobaciones.
                 False en caso contrario.
@@ -366,9 +380,11 @@ def check_projection_consistency(plan_proj, elevation_proj, section_proj, orig_e
             return False
 
         # 2. Reconstruir el modelo 3D a partir de las proyecciones
-        points_3d, edges_3d = reconstruct_3d_from_projections(plan_proj, elevation_proj, section_proj, orig_edges)
+        points_3d = reconstruct_points_3d(plan_proj, elevation_proj, section_proj, tolerance)
         if len(points_3d) == 0:
             return False
+
+        edges_3d = reconstruct_edges_3d(points_3d, plan_proj, elevation_proj, section_proj, tolerance)
 
         # 3. Verificar consistencia global del modelo 3D
         if not check_model_consistency(points_3d, edges_3d):
@@ -377,13 +393,7 @@ def check_projection_consistency(plan_proj, elevation_proj, section_proj, orig_e
         # 4. Reconstruir las proyecciones a partir del modelo 3D obtenido
         recon_plan, recon_elevation, recon_section = project_cloud(points_3d, edges_3d)
 
-        # 5. Verificar que el número de puntos coincide en cada proyección
-        if (len(plan_proj.points) != len(recon_plan.points) or
-                len(elevation_proj.points) != len(recon_elevation.points) or
-                len(section_proj.points) != len(recon_section.points)):
-            return False
-
-        # Comparar cada punto en la proyección original con algún punto en la reconstruida
+        # 5. Comparar cada punto en la proyección original con algún punto en la reconstruida
         for proj_orig, proj_recon in [
             (plan_proj, recon_plan),
             (elevation_proj, recon_elevation),
@@ -391,8 +401,8 @@ def check_projection_consistency(plan_proj, elevation_proj, section_proj, orig_e
         ]:
             for point_orig in proj_orig.points:
                 match_found = any(
-                    abs(point_orig[0] - point_recon[0]) < epsilon and
-                    abs(point_orig[1] - point_recon[1]) < epsilon
+                    abs(point_orig[0] - point_recon[0]) < tolerance and
+                    abs(point_orig[1] - point_recon[1]) < tolerance
                     for point_recon in proj_recon.points
                 )
                 if not match_found:
@@ -402,6 +412,216 @@ def check_projection_consistency(plan_proj, elevation_proj, section_proj, orig_e
     except Exception as e:
         print(f"Error al verificar consistencia: {e}")
         return False
+
+
+def build_projection_graph(proj: Projection) -> Graph:
+    """
+    Crea un grafo no dirigido a partir de los vértices y aristas de una proyección.
+
+    :param proj: Proyección utilizada para crear el grafo.
+    :return: Grafo con los vértices y conexiones de la proyección.
+    """
+    g = Graph()
+
+    for i in range(len(proj.points)):
+        g.add_vertex(i)
+
+    for u, v in proj.edges:
+        g.add_edge(u, v)
+    return g
+
+
+def canonical(cycle):
+    """
+    Rota la lista de vértices de un ciclo para que empiece por el índice mínimo.
+
+    :param cycle: Lista con los índices del ciclo.
+    :return: Tupla ordenada del ciclo.
+    """
+    i = cycle.index(min(cycle))
+    return tuple(cycle[i:] + cycle[:i])
+
+
+def fix_face_orientation(face, points):
+    """
+    Garantiza que la normal de la cara apunte al exterior del modelo.
+
+    :param face: Tupla con los índices de los vértices que componen la cara.
+    :param points: Array de puntos 3D del modelo.
+    :return: Cara resultante con la orientación correcta.
+    """
+    c = points[list(face)].mean(axis=0)
+
+    i, j, k = face[:3]
+    normal = np.cross(points[j] - points[i], points[k] - points[i])
+
+    if np.dot(normal, c - points.mean(axis=0)) < 0:
+        face = face[::-1]
+    return tuple(face)
+
+
+def find_cycles(proj: Projection, max_cycle_len=10):
+    """
+    Encuentra todos los ciclos del grafo de la proyección hasta una longitud dada.
+
+    :param proj: Proyección desde la que se extrae el grafo.
+    :param max_cycle_len: Longitud máxima del ciclo a buscar.
+    :return: Lista de ciclos encontrados.
+    """
+
+    # Construir el grafo a partir de las aristas de la proyección
+    graph = build_projection_graph(proj)
+    n_points = len(proj.points)
+
+    cycles = set()
+
+    def dfs_recursive(start, current, path, visited):
+        """
+        Realiza un recorrido en profundidad de forma recursiva para encontrar todos los ciclos.
+
+        :param start: Vértice de inicio del ciclo.
+        :param current: Vértice actual de exploración.
+        :param path: Camino actual recorrido.
+        :param visited: Vértices visitados en el camino actual.
+        """
+
+        # Añadir el nodo actual al camino y marcarlo como visitado
+        path.append(current)
+        visited[current] = True
+
+        # Recorrer los vecinos
+        for neighbor in graph.adj.get(current, Vertex(current)).neighbors():
+            w = neighbor.name
+
+            # Si ha llegado al inicio y el camino tiene al menos 3 nodos, hay ciclo
+            if w == start and len(path) > 2:
+                if len(path) <= max_cycle_len:
+                    cycles.add(canonical(path))
+                continue
+
+            # Búsqueda recursiva
+            if not visited.get(w, False):
+                dfs_recursive(start, w, path, visited)
+
+        # Eliminar el nodo del camino al retroceder
+        path.pop()
+        visited[current] = False
+
+    for v in range(n_points):
+        visited_path = {}
+        dfs_recursive(start=v, current=v, path=[], visited=visited_path)
+
+    return [list(c) for c in cycles]
+
+
+def is_face_connected(candidate_face, unique_edges):
+    """
+    Verifica que la cara esté formada por aristas 3D existentes.
+
+    :param candidate_face: Tupla con los índices de los vértices que componen la cara.
+    :param unique_edges: Array de aristas 3D del modelo.
+    :return:
+        - bool: True si la cara es conexa.
+                False en caso contrario.
+    """
+    for i in range(len(candidate_face)):
+        u = candidate_face[i]
+        v = candidate_face[(i + 1) % len(candidate_face)]
+
+        if tuple(sorted((u, v))) not in unique_edges:
+            return False
+
+    return True
+
+
+def is_face_coplanar(face, points, tolerance=1e-2):
+    """
+    Verifica que todos los puntos de la cara se encuentren en un mismo plano.
+
+    :param face: Tupla con los índices de los vértices que componen la cara.
+    :param points: Array de puntos 3D del modelo.
+    :param tolerance: Tolerancia para la comparación de coordenadas.
+    :return:
+        - bool: True si la cara es coplanar.
+                False en caso contrario.
+    """
+    if len(face) < 4:
+        return True
+
+    p0, p1, p2 = points[face[:3]]
+
+    normal = np.cross(p1 - p0, p2 - p0)
+    norm = np.linalg.norm(normal)
+
+    if norm < tolerance:
+        return False
+    normal = normal / norm
+
+    for idx in face[3:]:
+        distance = abs(np.dot(points[idx] - p0, normal))
+        if distance >= tolerance:
+            return False
+
+    return True
+
+
+def cycles_to_faces(proj: Projection, cycles, points_3d, edges_3d, tolerance=1e-2):
+    """
+    Convierte los ciclos 2D de una proyección en caras 3D.
+
+    :param proj: Proyección a procesar.
+    :param cycles: Ciclos 2D de la proyección.
+    :param points_3d: Array de puntos 3D del modelo.
+    :param edges_3d: Array de aristas 3D del modelo.
+    :param tolerance: Tolerancia para la comparación de coordenadas.
+    :return: Lista de caras 3D de la proyección.
+    """
+    axis = int(np.argmax(proj.normal))
+    mask = tuple(i for i in range(3) if i != axis)
+
+    unique_edges = {tuple(sorted(e)) for e in edges_3d}
+
+    # Relacionar cada punto 2D con sus posibles puntos 3D
+    candidates = [[] for _ in range(len(proj.points))]
+    for idx_2d, p_2d in enumerate(proj.points):
+        u, v = p_2d
+
+        for idx_3d, p_3d in enumerate(points_3d):
+            if (abs(p_3d[mask[0]] - u) < tolerance and
+                    abs(p_3d[mask[1]] - v) < tolerance):
+                candidates[idx_2d].append(idx_3d)
+
+    # Buscar caras válidas
+    faces = []
+    unique_faces = set()
+
+    for cycle in cycles:
+        # Generar todas las listas de candidatos para los puntos del ciclo
+        candidates_for_cycle = [candidates[idx_2d] for idx_2d in cycle]
+
+        # Generar todas las combinaciones posibles de caras, utilizando el producto cartesiano
+        for candidate_face in product(*candidates_for_cycle):
+            # Descartar si tiene vértices repetidos
+            if len(set(candidate_face)) != len(candidate_face):
+                continue
+
+            # Validar conectividad
+            if not is_face_connected(candidate_face, unique_edges):
+                continue
+
+            # Validar coplanaridad
+            if not is_face_coplanar(list(candidate_face), points_3d, tolerance):
+                continue
+
+            # Añadir la cara a la lista
+            key = tuple(sorted(candidate_face))
+            if key not in unique_faces:
+                oriented_face = fix_face_orientation(list(candidate_face), points_3d)
+                faces.append(oriented_face)
+
+                unique_faces.add(key)
+
+    return faces
 
 
 SEGMENT1 = (
@@ -608,27 +828,41 @@ def main():
         print(f"\n=== Procesando forma: {name} ===")
 
         # Obtener vértices y aristas de la forma
-        points, edges = shape
+        points_3d, edges_3d = shape
 
         # Generar las proyecciones ortogonales
-        plan, elevation, section = project_cloud(points, edges)
+        plan, elevation, section = project_cloud(points_3d, edges_3d)
 
-        # Comprobar si las proyecciones son consistentes entre sí y con el modelo 3D
-        if check_projection_consistency(plan, elevation, section, edges):
-            # Reconstruir el modelo 3D a partir de las proyecciones
-            reconstruct_points, reconstruct_edges = reconstruct_3d_from_projections(plan, elevation, section, edges)
+        # Verificar la conectividad de cada proyección
+        if not check_projection_connectivity((plan, elevation, section)):
+            print("Inconsistencia en la conectividad de las proyecciones.")
+            continue
 
-            # Visualizar las proyecciones originales en 2D
-            plot_projections((plan, elevation, section))
+        plan_cycles = find_cycles(plan)
+        elevation_cycles = find_cycles(elevation)
+        section_cycles = find_cycles(section)
 
-            # Visualizar el modelo 3D reconstruido
-            plot_3d_model(reconstruct_points, reconstruct_edges)
+        all_faces = []
+        all_faces += cycles_to_faces(plan, plan_cycles, points_3d, edges_3d)
+        all_faces += cycles_to_faces(elevation, elevation_cycles, points_3d, edges_3d)
+        all_faces += cycles_to_faces(section, section_cycles, points_3d, edges_3d)
 
-            # Reconstruir y visualizar la malla 3D
-            faces = reconstruct_mesh(reconstruct_points)
-            plot_3d_mesh(reconstruct_points, faces)
-        else:
-            print(f"No se pudo reconstruir la forma {name} a partir de sus proyecciones.")
+        # Comprobar la consistencia global del modelo 3D reconstruido
+        if not check_model_consistency(points_3d, edges_3d):
+            print("Inconsistencia global en el modelo 3D reconstruido.")
+            continue
+
+        unique_faces = set()
+        faces = []
+        for face in all_faces:
+            key = tuple(sorted(face))
+            if key not in unique_faces:
+                faces.append(face)
+                unique_faces.add(key)
+
+        # Visualizar el modelo 3D
+        print(f"Puntos 3D: {len(points_3d)}, Aristas 3D: {len(edges_3d)}, Caras: {len(faces)}")
+        plot_3d_mesh(points_3d, faces)
 
 
 if __name__ == '__main__':

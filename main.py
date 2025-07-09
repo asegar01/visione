@@ -4,9 +4,16 @@ import open3d
 import math
 import cv2
 
-
-# Profundidad de la imagen
-# model = cv2.dnn.readNetFromTorch('midas_model.pt')
+from vistas import (
+    Projection,
+    plot_3d_mesh,
+    reconstruct_points_3d,
+    reconstruct_edges_3d,
+    check_projection_connectivity,
+    check_model_consistency,
+    find_cycles,
+    cycles_to_faces
+)
 
 
 def grid_detection_calibration(image, min_line_length=100, max_line_gap=10):
@@ -27,7 +34,14 @@ def grid_detection_calibration(image, min_line_length=100, max_line_gap=10):
     edges = cv2.Canny(image_gray, 100, 200)
 
     # Detectar líneas
-    lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=50, minLineLength=min_line_length, maxLineGap=max_line_gap)
+    lines = cv2.HoughLinesP(
+        edges,
+        1,
+        np.pi / 180,
+        threshold=50,
+        minLineLength=min_line_length,
+        maxLineGap=max_line_gap
+    )
 
     # Filtrar líneas horizontales y verticales
     h_lines = []
@@ -86,40 +100,71 @@ def grid_detection_calibration(image, min_line_length=100, max_line_gap=10):
     return image_out, transform
 
 
-def corner_detection(image):
+def get_points_and_edges_from_contours(image):
     """
-    Detecta las esquinas (vértices) de la figura en la imagen.
+    Detecta los vértices y aristas de la figura en la imagen a partir de sus contornos.
 
     :param image: Imagen de entrada.
     :return:
-        - corners: Lista de tuplas (x, y) con las coordenadas de cada esquina detectada.
+        - Lista de tuplas (x, y) con las coordenadas de los vértices únicos detectados.
+        - Lista de aristas, definidas como pares de índices de los vértices.
     """
     # Convertir la imagen a escala de grises
     image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-    # Binarizar la imagem
-    # _, image_bin = cv2.threshold(image_gray, 127, 255, cv2.THRESH_BINARY_INV)
+    # Binarizar la imagen
+    _, image_bin = cv2.threshold(
+        image_gray,
+        127,
+        255,
+        cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )
 
     # Encontrar contornos
-    contours, _ = cv2.findContours(image_gray, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(image_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
-    corners = []
-    if contours:
-        # Extraer el contorno más grande
-        c = max(contours, key=cv2.contourArea)
+    points = []
+    edges = set()
+    vertex_map = {}
+
+    def get_unique_point(point):
+        """
+        Comprueba si el punto ya existe para tener vértices únicos.
+
+        :param point: Tupla (x, y) con las coordenadas del punto a comprobar.
+        :return: Índice del vértice único.
+        """
+        for p, index in vertex_map.items():
+            if np.linalg.norm(np.array(p) - np.array(point)) < 15:
+                return index
+
+        index = len(points)
+        points.append(point)
+        vertex_map[point] = index
+        return index
+
+    for c in contours:
+        # Filtrar ruido
+        if cv2.contourArea(c) < 100:
+            continue
 
         # Calcula la longitud del contorno y define la tolerancia
-        epsilon = 0.01 * cv2.arcLength(c, True)
+        epsilon = 0.02 * cv2.arcLength(c, True)
 
         # Aproximar el contorno a un polígono
         approx = cv2.approxPolyDP(c, epsilon, True)
 
-        # Añadir vértices a la lista
-        for pt in approx:
-            x, y = pt[0]
-            corners.append((x, y))
+        # Obtener los índices de los vértices del polígono
+        index_path = [get_unique_point(tuple(pt.ravel())) for pt in approx]
 
-    return corners
+        # Crear las aristas a partir del polígono
+        for i in range(len(index_path)):
+            u = index_path[i]
+            v = index_path[(i + 1) % len(index_path)]
+            edge = tuple(sorted((u, v)))
+            edges.add(edge)
+
+    return np.array(points, dtype=np.float32), np.array(list(edges), dtype=int)
 
 
 def pixel_to_real(px, py, transform):
@@ -141,32 +186,52 @@ def pixel_to_real(px, py, transform):
     return real_x, real_y
 
 
-def poisson_reconstruction(points):
+def normalize_and_scale_views(front_points, left_points, top_points):
     """
-    Reconstruye una malla poligonal a partir de una nube de puntos.
+    Ajusta las vistas ortogonales para que compartan un origen y escala común.
 
-    :param points: Array de puntos en 3D.
-    :return:
-        - mesh: Malla reconstruida.
+    :param front_points: Array de puntos 2D de la vista frontal (alzado).
+    :param left_points: Array de puntos 2D de la vista lateral (perfil).
+    :param top_points: Array de puntos 2D de la vista superior (planta).
+    :return: Tupla con los puntos normalizados y escalados de las vistas.
     """
-    # Generar nube de puntos
-    pcd = open3d.geometry.PointCloud()
-    pcd.points = open3d.utility.Vector3dVector(points)
+    if len(front_points) == 0 or len(left_points) == 0 or len(top_points) == 0:
+        return front_points, left_points, top_points
 
-    # Estimación de normales
-    #pcd.estimate_normals(search_param=open3d.geometry.KDTreeSearchParamKNN(knn=30))
-    pcd.estimate_normals(search_param=open3d.geometry.KDTreeSearchParamHybrid(radius=0.1, max_nn=30))
+    # Calcular límites de cada vista
+    front_min, front_max = np.min(front_points, axis=0), np.max(front_points, axis=0)
+    left_min, left_max = np.min(left_points, axis=0), np.max(left_points, axis=0)
+    top_min, top_max = np.min(top_points, axis=0), np.max(top_points, axis=0)
 
-    # Reconstruir la malla
-    mesh, densities = open3d.geometry.TriangleMesh.create_from_point_cloud_poisson(pcd, depth=8)
+    # Calcular rangos de cada vista
+    front_range = front_max - front_min
+    left_range = left_max - left_min
+    top_range = top_max - top_min
 
-    # Filtrar la malla
-    # densities = np.asarray(densities)
-    # density_threshold = np.quantile(densities, 0.1)
-    # vertices_to_remove = densities < density_threshold
-    # mesh.remove_vertices_by_mask(vertices_to_remove)
+    # Calcular dimensiones máximas del objeto
+    max_width = max(front_range[0], top_range[0])  # Anchura (X) -> Vistas frontal y superior
+    max_height = max(front_range[1], left_range[0])  # Altura (Y) -> Vistas frontal y lateral
+    max_depth = max(top_range[1], left_range[1])  # Profundidad (Z) -> Vistas superior y lateral
 
-    return mesh
+    # Normalizar y escalar cada vista
+    def align_view(points, view_origin, view_range, target_dimensions):
+        # Trasladar puntos al origen
+        norm_points = points - view_origin
+
+        # Invertir el eje Y
+        norm_points[:, 1] = view_range[1] - norm_points[:, 1]
+
+        # Escalar los puntos a las dimensiones
+        scale = np.array(target_dimensions) / view_range
+        scaled_points = norm_points * scale
+
+        return scaled_points
+
+    front_norm = align_view(front_points, front_min, front_range, (max_width, max_height))
+    left_norm = align_view(left_points, left_min, left_range, (max_height, max_depth))
+    top_norm = align_view(top_points, top_min, top_range, (max_width, max_depth))
+
+    return front_norm, left_norm, top_norm
 
 
 def show_window(name, image):
@@ -184,129 +249,107 @@ def show_window(name, image):
     cv2.destroyAllWindows()
 
 
+def export_obj(path, points, faces):
+    """
+    Exporta una malla 3D al formato OBJ.
+
+    :param path: Ruta de destino del archivo.
+    :param points: Array de vértices 3D.
+    :param faces: Array de caras, definidas como una tupla con los índices de los vértices que la componen.
+    """
+    with open(path, 'w') as file:
+        for vertex in points:
+            file.write(f'v {vertex[0]:.6f} {vertex[1]:.6f} {vertex[2]:.6f}\n')
+        for face in faces:
+            idx = ' '.join(str(i + 1) for i in face)
+            file.write(f'f {idx}\n')
+
+
 def main():
     # Cargar imágenes de vistas
-    front_view_path = 'examples/grid_square.png'
-    left_view_path = 'examples/grid_square.png'
-    top_view_path = 'examples/grid_square.png'
+    try:
+        front_view = cv2.imread('examples/square_front.png')
+        left_view = cv2.imread('examples/triangle.png')
+        top_view = cv2.imread('examples/square_top.png')
 
-    front_view = cv2.imread(front_view_path)
-    left_view = cv2.imread(left_view_path)
-    top_view = cv2.imread(top_view_path)
-
-    if front_view is None or left_view is None or top_view is None:
-        print("Error al cargar las imágenes.")
+        if front_view is None or left_view is None or top_view is None:
+            print("Error: No se pudo cargar una o más imágenes. Asegúrate de que las rutas son correctas")
+            return
+    except Exception as e:
+        print(f"Error al leer las imágenes: {e}")
         return
 
     # Calibrar cuadrícula en cada vista
-    front_calibrate, front_transform = grid_detection_calibration(front_view)
-    left_calibrate, left_transform = grid_detection_calibration(left_view)
-    top_calibrate, top_transform = grid_detection_calibration(top_view)
+    # front_calibrate, front_transform = grid_detection_calibration(front_view)
+    # left_calibrate, left_transform = grid_detection_calibration(left_view)
+    # top_calibrate, top_transform = grid_detection_calibration(top_view)
 
-    show_window('Hough', front_calibrate)
+    # Detectar los vértices y aristas en cada vista
+    front_points_2d, front_edges_2d = get_points_and_edges_from_contours(front_view)
+    left_points_2d, left_edges_2d = get_points_and_edges_from_contours(left_view)
+    top_points_2d, top_edges_2d = get_points_and_edges_from_contours(top_view)
 
-    # Detectar esquinas del objeto en cada vista
-    front_corners = corner_detection(front_view)
-    left_corners = corner_detection(left_view)
-    top_corners = corner_detection(top_view)
+    # Normalizar y escalar las vistas
+    front_points_2d, left_points_2d, top_points_2d = normalize_and_scale_views(
+        front_points_2d, left_points_2d, top_points_2d
+    )
 
-    # Emparejar puntos entre vistas
-    # se podrían ordenar y asociar las i-ésimas esquinas de cada vista --> mismo número de esquinas por vista
-    n_corners = min(len(front_corners), len(left_corners), len(top_corners))
+    # Crear objetos de proyección 2D
+    elevation = Projection(front_points_2d, front_edges_2d, np.array([0, 0, 1]), 'elevation')
+    section = Projection(left_points_2d, left_edges_2d, np.array([1, 0, 0]), 'section')
+    plan = Projection(top_points_2d, top_edges_2d, np.array([0, 1, 0]), 'plan')
 
-    # Convertir coordenadas de cuadrícula a coordenadas reales
-    front_corners_real = []
-    for (px, py) in front_corners:
-        front_corners_real.append(pixel_to_real(px, py, front_transform))
+    # Verificar la conectividad de cada proyección
+    if not check_projection_connectivity((plan, elevation, section)):
+        print("Inconsistencia en la conectividad de las proyecciones.")
+        return
 
-    left_corners_real = []
-    for (px, py) in left_corners:
-        left_corners_real.append(pixel_to_real(px, py, left_transform))
+    tolerance = 5.0
 
-    top_corners_real = []
-    for (px, py) in top_corners:
-        top_corners_real.append(pixel_to_real(px, py, top_transform))
+    # Reconstruir el modelo 3D a partir de las proyecciones ortogonales
+    points_3d = reconstruct_points_3d(plan, elevation, section, tolerance)
+    if len(points_3d) < 4:
+        print("No se han podido reconstruir suficientes puntos 3D para formar una figura.")
+        return
 
-    # Reconstruir puntos 3D
-    points = []
-    for i in range(n_corners):
-        x_front, y_front = front_corners_real[i]
-        z_left, y_left = left_corners_real[i]
-        x_top, z_top = top_corners_real[i]
+    edges_3d = reconstruct_edges_3d(points_3d, plan, elevation, section, tolerance)
+    if len(edges_3d) == 0:
+        print("No se han podido reconstruir suficientes aristas 3D para formar una figura.")
+        return
 
-        x = (x_front + x_top) / 2.0
-        y = (y_front + y_left) / 2.0
-        z = (z_left + z_top) / 2.0
+    # Encontrar ciclos y reconstruir caras
+    plan_cycles = find_cycles(plan)
+    elevation_cycles = find_cycles(elevation)
+    section_cycles = find_cycles(section)
 
-        points.append([x, y, z])
+    all_faces = []
+    all_faces += cycles_to_faces(plan, plan_cycles, points_3d, edges_3d, tolerance)
+    all_faces += cycles_to_faces(elevation, elevation_cycles, points_3d, edges_3d, tolerance)
+    all_faces += cycles_to_faces(section, section_cycles, points_3d, edges_3d, tolerance)
 
-    points = np.array(points, dtype=np.float32)
+    # Comprobar la consistencia global del modelo 3D reconstruido
+    if not check_model_consistency(points_3d, edges_3d):
+        print("Inconsistencia global en el modelo 3D reconstruido.")
+        return
 
-    # Reconstrucción de la superficie
-    mesh = poisson_reconstruction(points)
+    unique_faces = set()
+    faces = []
+    for face in all_faces:
+        key = tuple(sorted(face))
+        if key not in unique_faces:
+            faces.append(face)
+            unique_faces.add(key)
 
-    # Visualizar el modelo
-    open3d.visualization.draw_geometries([mesh])
+    if not faces:
+        print("No se pudo reconstruir ninguna cara.")
+        return
+
+    # Visualizar el modelo reconstruido
+    plot_3d_mesh(points_3d, faces)
+
+    # Exportar a formato .obj
+    # export_obj("output/model.obj", points_3d, faces)
 
 
 if __name__ == '__main__':
     main()
-
-
-# orb = cv2.ORB_create(nfeatures=1000)
-
-# Detectar keypoints
-# kp_front, des_front = orb.detectAndCompute(front_view, None)
-# kp_left, des_left = orb.detectAndCompute(left_view, None)
-# kp_top, des_top = orb.detectAndCompute(top_view, None)
-
-# draw only keypoints location,not size and orientation
-# img_kp_front = cv2.drawKeypoints(front_view, kp_front, None, color=(0, 255, 0), flags=0)
-# img_kp_left = cv2.drawKeypoints(left_view, kp_left, None, color=(0, 255, 0), flags=0)
-# img_kp_top = cv2.drawKeypoints(top_view, kp_top, None, color=(0, 255, 0), flags=0)
-
-# create BFMatcher object
-# bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-# bf = cv2.BFMatcher(cv2.NORM_HAMMING) --> match KNN
-
-# Emparejamiento frontal, lateral
-# matches_fl = bf.match(des_front, des_left)
-
-# Sort them in the order of their distance.
-# matches_fl = sorted(matches_fl, key=lambda x: x.distance)
-
-# Emparejamiento frontal, superior
-# matches_fs = bf.match(des_front, des_top)
-
-# Sort them in the order of their distance.
-# matches_fs = sorted(matches_fs, key=lambda x: x.distance)
-
-# Apply ratio test
-# points = []
-# for m, n in zip(matches_fl, matches_fs):
-# Aplicar filtro
-# if m.distance < 0.75 * n.distance:
-
-# Vista frontal
-# x_front, y_front = kp_front[m.queryIdx].pt
-
-# Vista lateral
-# z_left, y_left = kp_left[m.trainIdx].pt
-
-# Vista superior
-# x_top, z_top = kp_top[m.queryIdx].pt
-
-# x = (x_front + x_top) / 2.0
-# y = (y_front + y_left)
-# z = (z_left + z_top) / 2.0
-
-# points.append([x, y, z])
-
-# points_arr = np.array(points)
-
-# cv.drawMatchesKnn expects list of lists as matches.
-# img3 = cv2.drawMatches(front_view, kp_front, left_view, kp_left, points_arr, None, flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
-
-# point_cloud = open3d.geometry.PointCloud()
-# point_cloud.points = open3d.utility.Vector3dVector(points_arr)
-# open3d.visualization.draw_geometries([point_cloud])
