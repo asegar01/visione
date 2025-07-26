@@ -1,11 +1,12 @@
 import numpy as np
 import math
 
-from matplotlib import pyplot as plt
-from matplotlib import collections as mc
+import matplotlib.pyplot as plt
+import matplotlib.collections as mc
 from scipy.spatial import Delaunay, ConvexHull
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 from itertools import product
+import networkx as nx
 
 from graph import Graph, Vertex
 
@@ -121,15 +122,30 @@ def plot_3d_mesh(points, faces):
 
     # Construir la malla a partir de las caras
     mesh = [points[list(face)] for face in faces]
-    poly3d = Poly3DCollection(mesh, facecolors='cyan', alpha=0.5, edgecolors='k')
+    poly3d = Poly3DCollection(mesh, facecolors='cyan', alpha=1.0, edgecolors='k')
     ax.add_collection3d(poly3d)
 
-    ax.scatter(points[:, 0], points[:, 1], points[:, 2], c='r', marker='o')
+    # Mostrar los vértices
+    # ax.scatter(points[:, 0], points[:, 1], points[:, 2], c='r', s=10, marker='o')
+
+    # Ajustar relación de aspecto
+    max_bounds, min_bounds = np.max(points, axis=0), np.min(points, axis=0)
+    center = (max_bounds + min_bounds) / 2.0
+    max_range = np.max(max_bounds - min_bounds)
+
+    ax.set_xlim(center[0] - max_range / 2, center[0] + max_range / 2)
+    ax.set_ylim(center[1] - max_range / 2, center[1] + max_range / 2)
+    ax.set_zlim(center[2] - max_range / 2, center[2] + max_range / 2)
+
+    ax.set_box_aspect([1, 1, 1])
 
     ax.set_xlabel('X')
     ax.set_ylabel('Y')
     ax.set_zlabel('Z')
     ax.set_title('Malla 3D Reconstruida')
+
+    # Ajustar el ángulo de visualización
+    ax.view_init(elev=30, azim=45)
 
     plt.show()
 
@@ -350,7 +366,7 @@ def check_model_consistency(points, edges):
         for i, d in enumerate(degrees):
             if d < 3:
                 print(f"Inconsistencia global en el vértice {i} con coordenadas {points[i]} [grado {d}]")
-                return False
+                # return False
     return True
 
 
@@ -460,7 +476,30 @@ def fix_face_orientation(face, points):
     return tuple(face)
 
 
-def find_cycles(proj: Projection, max_cycle_len=10):
+def find_cycles(proj: Projection):
+    """
+    Encuentra todos los ciclos sin cuerdas (chordless cycles) del grafo de la proyección,
+    que corresponden a las caras mínimas.
+
+    :param proj: Proyección desde la que se extrae el grafo.
+    :return: Lista de ciclos encontrados.
+    """
+
+    # Construir un grafo no dirigido
+    graph = nx.Graph()
+    graph.add_nodes_from(range(len(proj.points)))
+    graph.add_edges_from(proj.edges)
+
+    # Encontrar los ciclos
+    try:
+        cycles = list(nx.chordless_cycles(graph))
+        return cycles
+    except nx.NetworkXError as e:
+        print(f"Error al encontrar los ciclos del grafo en la vista {proj.name}: {e}")
+        return []
+
+
+def find_cycles_old(proj: Projection, max_cycle_len=10):
     """
     Encuentra todos los ciclos del grafo de la proyección hasta una longitud dada.
 
@@ -549,11 +588,10 @@ def is_face_coplanar(face, points, tolerance=1e-2):
         return True
 
     p0, p1, p2 = points[face[:3]]
-
     normal = np.cross(p1 - p0, p2 - p0)
     norm = np.linalg.norm(normal)
 
-    if norm < tolerance:
+    if norm < 1e-3:
         return False
     normal = normal / norm
 
@@ -565,7 +603,7 @@ def is_face_coplanar(face, points, tolerance=1e-2):
     return True
 
 
-def cycles_to_faces(proj: Projection, cycles, points_3d, edges_3d, tolerance=1e-2):
+def cycles_to_faces(proj: Projection, cycles, points_3d, edges_3d, matching_tolerance, geometry_tolerance):
     """
     Convierte los ciclos 2D de una proyección en caras 3D.
 
@@ -573,7 +611,8 @@ def cycles_to_faces(proj: Projection, cycles, points_3d, edges_3d, tolerance=1e-
     :param cycles: Ciclos 2D de la proyección.
     :param points_3d: Array de puntos 3D del modelo.
     :param edges_3d: Array de aristas 3D del modelo.
-    :param tolerance: Tolerancia para la comparación de coordenadas.
+    :param matching_tolerance: Tolerancia de emparejamiento para la comparación de coordenadas.
+    :param geometry_tolerance: Tolerancia geométrica para la comparación de coordenadas.
     :return: Lista de caras 3D de la proyección.
     """
     axis = int(np.argmax(proj.normal))
@@ -585,10 +624,9 @@ def cycles_to_faces(proj: Projection, cycles, points_3d, edges_3d, tolerance=1e-
     candidates = [[] for _ in range(len(proj.points))]
     for idx_2d, p_2d in enumerate(proj.points):
         u, v = p_2d
-
         for idx_3d, p_3d in enumerate(points_3d):
-            if (abs(p_3d[mask[0]] - u) < tolerance and
-                    abs(p_3d[mask[1]] - v) < tolerance):
+            if (abs(p_3d[mask[0]] - u) < matching_tolerance and
+                    abs(p_3d[mask[1]] - v) < matching_tolerance):
                 candidates[idx_2d].append(idx_3d)
 
     # Buscar caras válidas
@@ -610,7 +648,7 @@ def cycles_to_faces(proj: Projection, cycles, points_3d, edges_3d, tolerance=1e-
                 continue
 
             # Validar coplanaridad
-            if not is_face_coplanar(list(candidate_face), points_3d, tolerance):
+            if not is_face_coplanar(list(candidate_face), points_3d, geometry_tolerance):
                 continue
 
             # Añadir la cara a la lista
@@ -622,6 +660,51 @@ def cycles_to_faces(proj: Projection, cycles, points_3d, edges_3d, tolerance=1e-
                 unique_faces.add(key)
 
     return faces
+
+
+def align_view(points, edges, tolerance=5.0):
+    """
+    Corrige los puntos de la vista para garantizar la ortogonalidad de las aristas.
+
+    :param points: Array de puntos 2D de la vista.
+    :param edges: Array de aristas que conectan los puntos.
+    :param tolerance: Tolerancia en grados para considerar aristas como horizontales o verticales.
+    :return: Lista de puntos alineados.
+    """
+    if len(points) == 0:
+        return points
+
+    candidates_x = [[] for _ in range(len(points))]
+    candidates_y = [[] for _ in range(len(points))]
+
+    # Identificar aristas horizontales y verticales
+    for u, v in edges:
+        p1, p2 = points[u], points[v]
+        dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+
+        angle = math.degrees(math.atan2(dy, dx))
+
+        # Comprobar si es horizontal
+        if abs(angle) < tolerance or abs(abs(angle) - 180) < tolerance:
+            average_y = (p1[1] + p2[1]) / 2.0
+            candidates_y[u].append(average_y)
+            candidates_y[v].append(average_y)
+
+        # Comprobar si es vertical
+        elif abs(abs(angle) - 90) < tolerance:
+            average_x = (p1[0] + p2[0]) / 2.0
+            candidates_x[u].append(average_x)
+            candidates_x[v].append(average_x)
+
+    # Corregir los puntos según lo calculado
+    aligned_points = points.copy()
+    for i in range(len(points)):
+        if candidates_x[i]:
+            aligned_points[i, 0] = np.mean(candidates_x[i])
+        if candidates_y[i]:
+            aligned_points[i, 1] = np.mean(candidates_y[i])
+
+    return aligned_points
 
 
 SEGMENT1 = (

@@ -4,6 +4,12 @@ import open3d
 import math
 import cv2
 
+from skimage import morphology
+from skimage.util import img_as_ubyte
+
+import matplotlib.pyplot as plt
+from matplotlib.collections import LineCollection
+
 from vistas import (
     Projection,
     plot_3d_mesh,
@@ -12,7 +18,8 @@ from vistas import (
     check_projection_connectivity,
     check_model_consistency,
     find_cycles,
-    cycles_to_faces
+    cycles_to_faces,
+    align_view
 )
 
 
@@ -120,8 +127,13 @@ def get_points_and_edges_from_contours(image):
         cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
     )
 
+    # Adelgazar la imagen
+    out_thin = morphology.thin(image_bin)
+    image_thin = img_as_ubyte(out_thin)
+    show_window('Thin', image_thin)
+
     # Encontrar contornos
-    contours, _ = cv2.findContours(image_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(image_thin, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
 
     points = []
     edges = set()
@@ -149,7 +161,7 @@ def get_points_and_edges_from_contours(image):
             continue
 
         # Calcula la longitud del contorno y define la tolerancia
-        epsilon = 0.02 * cv2.arcLength(c, True)
+        epsilon = 0.01 * cv2.arcLength(c, True)
 
         # Aproximar el contorno a un polígono
         approx = cv2.approxPolyDP(c, epsilon, True)
@@ -203,35 +215,83 @@ def normalize_and_scale_views(front_points, left_points, top_points):
     left_min, left_max = np.min(left_points, axis=0), np.max(left_points, axis=0)
     top_min, top_max = np.min(top_points, axis=0), np.max(top_points, axis=0)
 
+    # Trasladar las vistas al origen
+    front_norm = front_points - front_min
+    left_norm = left_points - left_min
+    top_norm = top_points - top_min
+
+    # Calcular dimensiones del objeto
+    width = front_max[0] - front_min[0]  # Anchura (X) -> Vistas frontal y superior
+    height = front_max[1] - front_min[1]  # Altura (Y) -> Vistas frontal y lateral
+    depth = top_max[1] - top_min[1]  # Profundidad (Z) -> Vistas superior y lateral
+
     # Calcular rangos de cada vista
     front_range = front_max - front_min
     left_range = left_max - left_min
     top_range = top_max - top_min
 
-    # Calcular dimensiones máximas del objeto
-    max_width = max(front_range[0], top_range[0])  # Anchura (X) -> Vistas frontal y superior
-    max_height = max(front_range[1], left_range[0])  # Altura (Y) -> Vistas frontal y lateral
-    max_depth = max(top_range[1], left_range[1])  # Profundidad (Z) -> Vistas superior y lateral
+    front_scaled = front_norm.copy()
+    left_scaled = left_norm.copy()
+    top_scaled = top_norm.copy()
 
-    # Normalizar y escalar cada vista
-    def align_view(points, view_origin, view_range, target_dimensions):
-        # Trasladar puntos al origen
-        norm_points = points - view_origin
+    # Escalar alzado (XY)
+    front_scaled[:, 0] *= (width / front_range[0])
+    front_scaled[:, 1] *= (height / front_range[1])
 
-        # Invertir el eje Y
-        norm_points[:, 1] = view_range[1] - norm_points[:, 1]
+    # Escalar perfil (ZY)
+    left_scaled[:, 0] *= (depth / left_range[0])
+    left_scaled[:, 1] *= (height / left_range[1])
 
-        # Escalar los puntos a las dimensiones
-        scale = np.array(target_dimensions) / view_range
-        scaled_points = norm_points * scale
+    # Escalar planta (XZ)
+    top_scaled[:, 0] *= (width / top_range[0])
+    top_scaled[:, 1] *= (depth / top_range[1])
 
-        return scaled_points
+    return front_scaled, left_scaled, top_scaled
 
-    front_norm = align_view(front_points, front_min, front_range, (max_width, max_height))
-    left_norm = align_view(left_points, left_min, left_range, (max_height, max_depth))
-    top_norm = align_view(top_points, top_min, top_range, (max_width, max_depth))
 
-    return front_norm, left_norm, top_norm
+def show_views(name, front_points, front_edges, left_points, left_edges, top_points, top_edges):
+    """
+    Muestra una nueva ventana con los puntos y aristas detectados en cada vista.
+
+    :param name: Nombre de la ventana.
+    :param front_points: Array de puntos 2D de la vista frontal (alzado).
+    :param front_edges: Array de aristas 2D de la vista frontal (alzado).
+    :param left_points: Array de puntos 2D de la vista lateral (perfil).
+    :param left_edges: Array de aristas 2D de la vista lateral (perfil).
+    :param top_points: Array de puntos 2D de la vista superior (planta).
+    :param top_edges: Array de aristas 2D de la vista superior (planta).
+    """
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
+    fig.suptitle(name, fontsize=15)
+
+    # Vista frontal (alzado)
+    ax1.set_title("Alzado")
+    if len(front_points) > 0:
+        ax1.scatter(front_points[:, 0], front_points[:, 1], c='r')
+        front_lines = [(front_points[u], front_points[v]) for u, v in front_edges]
+        ax1.add_collection(LineCollection(front_lines, colors='b'))
+    ax1.set_aspect('equal', adjustable='box')
+    ax1.grid(True)
+
+    # Vista lateral (perfil)
+    ax2.set_title("Perfil")
+    if len(left_points) > 0:
+        ax2.scatter(left_points[:, 0], left_points[:, 1], c='r')
+        left_lines = [(left_points[u], left_points[v]) for u, v in left_edges]
+        ax2.add_collection(LineCollection(left_lines, colors='b'))
+    ax2.set_aspect('equal', adjustable='box')
+    ax2.grid(True)
+
+    # Vista superior (planta)
+    ax3.set_title("Planta")
+    if len(top_points) > 0:
+        ax3.scatter(top_points[:, 0], top_points[:, 1], c='r')
+        top_lines = [(top_points[u], top_points[v]) for u, v in top_edges]
+        ax3.add_collection(LineCollection(top_lines, colors='b'))
+    ax3.set_aspect('equal', adjustable='box')
+    ax3.grid(True)
+
+    plt.show()
 
 
 def show_window(name, image):
@@ -257,9 +317,14 @@ def export_obj(path, points, faces):
     :param points: Array de vértices 3D.
     :param faces: Array de caras, definidas como una tupla con los índices de los vértices que la componen.
     """
+    # Calcular factor de escala
+    max_size = np.max(points)
+    scale = 1.0 / max_size if max_size != 0 else 1.0
+
     with open(path, 'w') as file:
         for vertex in points:
-            file.write(f'v {vertex[0]:.6f} {vertex[1]:.6f} {vertex[2]:.6f}\n')
+            scaled_vertex = vertex * scale
+            file.write(f'v {scaled_vertex[0]:.6f} {scaled_vertex[1]:.6f} {scaled_vertex[2]:.6f}\n')
         for face in faces:
             idx = ' '.join(str(i + 1) for i in face)
             file.write(f'f {idx}\n')
@@ -268,9 +333,9 @@ def export_obj(path, points, faces):
 def main():
     # Cargar imágenes de vistas
     try:
-        front_view = cv2.imread('examples/square_front.png')
-        left_view = cv2.imread('examples/triangle.png')
-        top_view = cv2.imread('examples/square_top.png')
+        front_view = cv2.imread('examples/complex_3_front_aligned.png')
+        left_view = cv2.imread('examples/complex_3_left_aligned.png')
+        top_view = cv2.imread('examples/complex_3_top_aligned.png')
 
         if front_view is None or left_view is None or top_view is None:
             print("Error: No se pudo cargar una o más imágenes. Asegúrate de que las rutas son correctas")
@@ -289,10 +354,43 @@ def main():
     left_points_2d, left_edges_2d = get_points_and_edges_from_contours(left_view)
     top_points_2d, top_edges_2d = get_points_and_edges_from_contours(top_view)
 
+    # Corregir ortogonalidad de las vistas
+    front_points_2d = align_view(front_points_2d, front_edges_2d)
+    left_points_2d = align_view(left_points_2d, left_edges_2d)
+    top_points_2d = align_view(top_points_2d, top_edges_2d)
+
+    # Invertir el eje vertical del modelo
+    if len(front_points_2d) > 0:
+        front_points_2d[:, 1] = front_view.shape[0] - front_points_2d[:, 1]
+
+    if len(left_points_2d) > 0:
+        left_points_2d[:, 1] = left_view.shape[0] - left_points_2d[:, 1]
+
+    if len(top_points_2d) > 0:
+        top_points_2d[:, 1] = top_view.shape[0] - top_points_2d[:, 1]
+
+    show_views(
+        "Vistas originales",
+        front_points_2d, front_edges_2d,
+        left_points_2d, left_edges_2d,
+        top_points_2d, top_edges_2d
+    )
+
     # Normalizar y escalar las vistas
     front_points_2d, left_points_2d, top_points_2d = normalize_and_scale_views(
         front_points_2d, left_points_2d, top_points_2d
     )
+
+    show_views(
+        "Vistas normalizadas",
+        front_points_2d, front_edges_2d,
+        left_points_2d, left_edges_2d,
+        top_points_2d, top_edges_2d
+    )
+
+    # Intercambiar coordenadas del perfil
+    if len(left_points_2d) > 0:
+        left_points_2d = left_points_2d[:, [1, 0]]
 
     # Crear objetos de proyección 2D
     elevation = Projection(front_points_2d, front_edges_2d, np.array([0, 0, 1]), 'elevation')
@@ -304,28 +402,36 @@ def main():
         print("Inconsistencia en la conectividad de las proyecciones.")
         return
 
-    tolerance = 5.0
+    point_min, point_max = np.min(front_points_2d, axis=0), np.max(front_points_2d, axis=0)
+    diagonal = np.linalg.norm(point_max - point_min)
+
+    matching_tolerance = diagonal * 0.05
+    geometry_tolerance = diagonal * 0.03
+
+    print(f"Tolerancia de emparejamiento: {matching_tolerance:.2f}")
+    print(f"Tolerancia geométrica: {geometry_tolerance:.2f}")
 
     # Reconstruir el modelo 3D a partir de las proyecciones ortogonales
-    points_3d = reconstruct_points_3d(plan, elevation, section, tolerance)
+    points_3d = reconstruct_points_3d(plan, elevation, section, matching_tolerance)
     if len(points_3d) < 4:
         print("No se han podido reconstruir suficientes puntos 3D para formar una figura.")
         return
 
-    edges_3d = reconstruct_edges_3d(points_3d, plan, elevation, section, tolerance)
+    edges_3d = reconstruct_edges_3d(points_3d, plan, elevation, section, matching_tolerance)
     if len(edges_3d) == 0:
         print("No se han podido reconstruir suficientes aristas 3D para formar una figura.")
         return
 
-    # Encontrar ciclos y reconstruir caras
+    # Encontrar ciclos
     plan_cycles = find_cycles(plan)
     elevation_cycles = find_cycles(elevation)
     section_cycles = find_cycles(section)
 
+    # Reconstruir caras
     all_faces = []
-    all_faces += cycles_to_faces(plan, plan_cycles, points_3d, edges_3d, tolerance)
-    all_faces += cycles_to_faces(elevation, elevation_cycles, points_3d, edges_3d, tolerance)
-    all_faces += cycles_to_faces(section, section_cycles, points_3d, edges_3d, tolerance)
+    all_faces.extend(cycles_to_faces(plan, plan_cycles, points_3d, edges_3d, matching_tolerance, geometry_tolerance))
+    all_faces.extend(cycles_to_faces(elevation, elevation_cycles, points_3d, edges_3d, matching_tolerance, geometry_tolerance))
+    all_faces.extend(cycles_to_faces(section, section_cycles, points_3d, edges_3d, matching_tolerance, geometry_tolerance))
 
     # Comprobar la consistencia global del modelo 3D reconstruido
     if not check_model_consistency(points_3d, edges_3d):
@@ -344,11 +450,18 @@ def main():
         print("No se pudo reconstruir ninguna cara.")
         return
 
+    # Invertir el eje Z del modelo reconstruido
+    points_3d[:, 2] *= -1
+    points_3d[:, 2] -= np.min(points_3d[:, 2])
+
+    # Intercambiar ejes para visualización
+    points_3d_mat = points_3d[:, [0, 2, 1]]
+
     # Visualizar el modelo reconstruido
-    plot_3d_mesh(points_3d, faces)
+    plot_3d_mesh(points_3d_mat, faces)
 
     # Exportar a formato .obj
-    # export_obj("output/model.obj", points_3d, faces)
+    export_obj("output/model.obj", points_3d, faces)
 
 
 if __name__ == '__main__':
