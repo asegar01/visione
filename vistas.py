@@ -122,7 +122,7 @@ def plot_3d_mesh(points, faces):
 
     # Construir la malla a partir de las caras
     mesh = [points[list(face)] for face in faces]
-    poly3d = Poly3DCollection(mesh, facecolors='cyan', alpha=1.0, edgecolors='k')
+    poly3d = Poly3DCollection(mesh, facecolors='cyan', alpha=0.8, edgecolors='k')
     ax.add_collection3d(poly3d)
 
     # Mostrar los vértices
@@ -145,7 +145,7 @@ def plot_3d_mesh(points, faces):
     ax.set_title('Malla 3D Reconstruida')
 
     # Ajustar el ángulo de visualización
-    ax.view_init(elev=30, azim=45)
+    ax.view_init(elev=30, azim=-45)
 
     plt.show()
 
@@ -343,8 +343,6 @@ def check_model_consistency(points, edges):
     Se calcula el grado de cada vértice y se comprueba que, para modelos de más de 4 vértices, cada
     vértice tenga al menos 3 conexiones.
 
-    [ ESTA VERIFICACIÓN ASUME MODELOS SÓLIDOS CERRADOS ]
-
     :param points: Matriz de puntos 3D.
     :param edges: Matriz de aristas.
     :return:
@@ -357,16 +355,16 @@ def check_model_consistency(points, edges):
     if len(points) < 3:
         return False
 
+    # Calcular grado de cada vértice
     degrees = np.zeros(len(points), dtype=int)
-    for edge in edges:
-        degrees[edge[0]] += 1
-        degrees[edge[1]] += 1
+    for u, v in edges:
+        degrees[u] += 1
+        degrees[v] += 1
 
-    if len(points) > 4:
-        for i, d in enumerate(degrees):
-            if d < 3:
-                print(f"Inconsistencia global en el vértice {i} con coordenadas {points[i]} [grado {d}]")
-                # return False
+    for i, deg in enumerate(degrees):
+        if deg < 3:
+            print(f"Inconsistencia global en el vértice {i} con coordenadas {points[i]} [grado {deg}]")
+            return False
     return True
 
 
@@ -660,6 +658,50 @@ def cycles_to_faces(proj: Projection, cycles, points_3d, edges_3d, matching_tole
                 unique_faces.add(key)
 
     return faces
+
+
+def filter_invalid_vertices(points_3d, edges_3d, min_degree=3):
+    """
+    Filtra los vértices que no cumplen con un grado mínimo de conectividad.
+
+    :param points_3d: Array de puntos 3D.
+    :param edges_3d: Array de aristas 3D.
+    :param min_degree: Grado mínimo que debe tener un vértice para ser conservado.
+    :return:
+        - filtered_points: Array de puntos filtrado.
+        - filtered_edges: Array de aristas actualizado con los nuevos índices de los puntos.
+    """
+    if len(points_3d) <= min_degree or len(edges_3d) == 0:
+        return points_3d, edges_3d
+
+    # Calcular grado de cada vértice
+    degrees = np.zeros(len(points_3d), dtype=int)
+    for u, v in edges_3d:
+        degrees[u] += 1
+        degrees[v] += 1
+
+    # Identificar los índices válidos.
+    # Si eliminamos el vértice 2, el antiguo vértice 3 será ahora el 2 -> {0:0, 1:1, 3:2, 4:3}
+    valid_indices = sorted([i for i, deg in enumerate(degrees) if deg >= min_degree])
+
+    if len(valid_indices) == len(points_3d):
+        return points_3d, edges_3d
+
+    # Traducir índices antiguos a nuevos
+    old_to_new_indices = {old_idx: new_idx for new_idx, old_idx in enumerate(valid_indices)}
+
+    # Filtrar lista de puntos y remapear aristas
+    filtered_points = points_3d[valid_indices]
+    filtered_edges = []
+
+    for u, v in edges_3d:
+        if u in old_to_new_indices and v in old_to_new_indices:
+            # Añadir la arista usando los índices nuevos
+            new_u = old_to_new_indices[u]
+            new_v = old_to_new_indices[v]
+            filtered_edges.append((new_u, new_v))
+
+    return filtered_points, np.array(filtered_edges, dtype=int)
 
 
 def align_view(points, edges, tolerance=5.0):

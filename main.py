@@ -19,7 +19,8 @@ from vistas import (
     check_model_consistency,
     find_cycles,
     cycles_to_faces,
-    align_view
+    align_view,
+    filter_invalid_vertices
 )
 
 
@@ -84,15 +85,15 @@ def grid_detection_calibration(image, min_line_length=100, max_line_gap=10):
     # Calcular separación entre líneas adyacentes
     h_spacings = []
     for i in range(len(h_centers) - 1):
-        _, yA = line_center(h_centers[i])
-        _, yB = line_center(h_centers[i + 1])
-        h_spacings.append(abs(yB - yA))
+        _, y_a = line_center(h_centers[i])
+        _, y_b = line_center(h_centers[i + 1])
+        h_spacings.append(abs(y_b - y_a))
 
     v_spacings = []
     for i in range(len(v_centers) - 1):
-        xA, _ = line_center(v_centers[i])
-        xB, _ = line_center(v_centers[i + 1])
-        v_spacings.append(abs(xB - xA))
+        x_a, _ = line_center(v_centers[i])
+        x_b, _ = line_center(v_centers[i + 1])
+        v_spacings.append(abs(x_b - x_a))
 
     # Definir la escala según la mediana de las separaciones
     h_spacings_mean = np.median(h_spacings) if h_spacings else 1
@@ -107,14 +108,16 @@ def grid_detection_calibration(image, min_line_length=100, max_line_gap=10):
     return image_out, transform
 
 
-def get_points_and_edges_from_contours(image):
+def crop_image(image):
     """
-    Detecta los vértices y aristas de la figura en la imagen a partir de sus contornos.
+    Recorta la imagen para ajustarla a la figura principal.
 
-    :param image: Imagen de entrada.
+    :param image: Imagen a recortar que contiene la figura.
     :return:
-        - Lista de tuplas (x, y) con las coordenadas de los vértices únicos detectados.
-        - Lista de aristas, definidas como pares de índices de los vértices.
+        - image_cropped: Imagen recortada.
+        - x: Coordenada x del origen del recorte en la imagen original.
+        - y: Coordenada y del origen del recorte en la imagen original.
+        -
     """
     # Convertir la imagen a escala de grises
     image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -127,10 +130,47 @@ def get_points_and_edges_from_contours(image):
         cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
     )
 
+    # Encontrar los contornos exteriores para identificar la figura principal
+    contours, _ = cv2.findContours(image_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    # Obtener la caja delimitadora (bounding box) de la figura
+    max_contour = max(contours, key=cv2.contourArea)
+    x, y, w, h = cv2.boundingRect(max_contour)
+
+    # Recortar la imagen original
+    image_cropped = image[y: y + h, x: x + w]
+
+    return image_cropped, x, y
+
+
+def get_points_and_edges_from_contours(image, noise_threshold=100, vertex_distance=15):
+    """
+    Detecta los vértices y aristas de la figura en la imagen a partir de sus contornos.
+
+    :param image: Imagen de entrada.
+    :param noise_threshold: Umbral de área para filtrar pequeños contornos considerados como ruido.
+    :param vertex_distance: Distancia máxima para fusionar dos puntos en un único vértice.
+    :return:
+        - Lista de tuplas (x, y) con las coordenadas de los vértices únicos detectados.
+        - Lista de aristas, definidas como pares de índices de los vértices.
+    """
+    # Recortar la imagen
+    image_cropped, offset_x, offset_y = crop_image(image)
+
+    # Convertir la imagen a escala de grises
+    image_cropped_gray = cv2.cvtColor(image_cropped, cv2.COLOR_BGR2GRAY)
+
+    # Binarizar la imagen
+    _, image_cropped_bin = cv2.threshold(
+        image_cropped_gray,
+        127,
+        255,
+        cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )
+
     # Adelgazar la imagen
-    out_thin = morphology.thin(image_bin)
+    out_thin = morphology.thin(image_cropped_bin)
     image_thin = img_as_ubyte(out_thin)
-    show_window('Thin', image_thin)
 
     # Encontrar contornos
     contours, _ = cv2.findContours(image_thin, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
@@ -147,7 +187,7 @@ def get_points_and_edges_from_contours(image):
         :return: Índice del vértice único.
         """
         for p, index in vertex_map.items():
-            if np.linalg.norm(np.array(p) - np.array(point)) < 15:
+            if np.linalg.norm(np.array(p) - np.array(point)) < vertex_distance:
                 return index
 
         index = len(points)
@@ -157,7 +197,7 @@ def get_points_and_edges_from_contours(image):
 
     for c in contours:
         # Filtrar ruido
-        if cv2.contourArea(c) < 100:
+        if cv2.contourArea(c) < noise_threshold:
             continue
 
         # Calcula la longitud del contorno y define la tolerancia
@@ -176,7 +216,13 @@ def get_points_and_edges_from_contours(image):
             edge = tuple(sorted((u, v)))
             edges.add(edge)
 
-    return np.array(points, dtype=np.float32), np.array(list(edges), dtype=int)
+    # Aplicar desplazamiento del recorte a los puntos
+    points = np.array(points, dtype=np.float32)
+    if points.size > 0:
+        points[:, 0] += offset_x
+        points[:, 1] += offset_y
+
+    return points, np.array(list(edges), dtype=int)
 
 
 def pixel_to_real(px, py, transform):
@@ -200,7 +246,7 @@ def pixel_to_real(px, py, transform):
 
 def normalize_and_scale_views(front_points, left_points, top_points):
     """
-    Ajusta las vistas ortogonales para que compartan un origen y escala común.
+    Ajusta las vistas ortogonales para que compartan un origen común.
 
     :param front_points: Array de puntos 2D de la vista frontal (alzado).
     :param left_points: Array de puntos 2D de la vista lateral (perfil).
@@ -230,23 +276,19 @@ def normalize_and_scale_views(front_points, left_points, top_points):
     left_range = left_max - left_min
     top_range = top_max - top_min
 
-    front_scaled = front_norm.copy()
-    left_scaled = left_norm.copy()
-    top_scaled = top_norm.copy()
-
     # Escalar alzado (XY)
-    front_scaled[:, 0] *= (width / front_range[0])
-    front_scaled[:, 1] *= (height / front_range[1])
+    front_norm[:, 0] *= (width / front_range[0])
+    front_norm[:, 1] *= (height / front_range[1])
 
     # Escalar perfil (ZY)
-    left_scaled[:, 0] *= (depth / left_range[0])
-    left_scaled[:, 1] *= (height / left_range[1])
+    left_norm[:, 0] *= (depth / left_range[0])
+    left_norm[:, 1] *= (height / left_range[1])
 
     # Escalar planta (XZ)
-    top_scaled[:, 0] *= (width / top_range[0])
-    top_scaled[:, 1] *= (depth / top_range[1])
+    top_norm[:, 0] *= (width / top_range[0])
+    top_norm[:, 1] *= (depth / top_range[1])
 
-    return front_scaled, left_scaled, top_scaled
+    return front_norm, left_norm, top_norm
 
 
 def show_views(name, front_points, front_edges, left_points, left_edges, top_points, top_edges):
@@ -261,7 +303,7 @@ def show_views(name, front_points, front_edges, left_points, left_edges, top_poi
     :param top_points: Array de puntos 2D de la vista superior (planta).
     :param top_edges: Array de aristas 2D de la vista superior (planta).
     """
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 5))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(10, 5))
     fig.suptitle(name, fontsize=15)
 
     # Vista frontal (alzado)
@@ -333,9 +375,9 @@ def export_obj(path, points, faces):
 def main():
     # Cargar imágenes de vistas
     try:
-        front_view = cv2.imread('examples/complex_3_front_aligned.png')
-        left_view = cv2.imread('examples/complex_3_left_aligned.png')
-        top_view = cv2.imread('examples/complex_3_top_aligned.png')
+        front_view = cv2.imread('examples/complex_4_front_aligned.png')
+        left_view = cv2.imread('examples/complex_4_left_aligned.png')
+        top_view = cv2.imread('examples/complex_4_top_aligned.png')
 
         if front_view is None or left_view is None or top_view is None:
             print("Error: No se pudo cargar una o más imágenes. Asegúrate de que las rutas son correctas")
@@ -422,6 +464,9 @@ def main():
         print("No se han podido reconstruir suficientes aristas 3D para formar una figura.")
         return
 
+    # Limpiar el modelo por grado mínimo de sus vértices
+    points_3d, edges_3d = filter_invalid_vertices(points_3d, edges_3d)
+
     # Encontrar ciclos
     plan_cycles = find_cycles(plan)
     elevation_cycles = find_cycles(elevation)
@@ -449,10 +494,6 @@ def main():
     if not faces:
         print("No se pudo reconstruir ninguna cara.")
         return
-
-    # Invertir el eje Z del modelo reconstruido
-    points_3d[:, 2] *= -1
-    points_3d[:, 2] -= np.min(points_3d[:, 2])
 
     # Intercambiar ejes para visualización
     points_3d_mat = points_3d[:, [0, 2, 1]]
