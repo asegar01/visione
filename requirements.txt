@@ -6,3 +6,4 @@ matplotlib~=3.10.0
 scipy~=1.15.2
 networkx~=3.4.2
 scikit-image~=0.25.2
+tkinterdnd2~=0.4.3

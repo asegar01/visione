@@ -231,7 +231,98 @@ def reconstruct_points_3d(plan_proj, elevation_proj, section_proj, tolerance=1e-
     return points_3d
 
 
-def reconstruct_edges_3d(points_3d, plan_proj, elevation_proj, section_proj, tolerance=1e-2):
+def get_angle(a, b):
+    """
+    Calcula el ángulo en grados entre dos vectores mediante el producto escalar.
+
+    :param a: Primer vector.
+    :param b: Segundo vector.
+    :return: Ángulo en grados.
+    """
+    na, nb = np.linalg.norm(a), np.linalg.norm(b)
+    if na < 1e-12 or nb < 1e-12:
+        return 0.0
+
+    # Coseno del ángulo
+    cos = np.dot(a, b) / (na * nb)
+    cos = np.clip(cos, -1.0, 1.0)
+
+    # Convertir a ángulo en grados
+    angle = np.degrees(np.arccos(cos))
+    return angle
+
+
+def is_collinear(a, b, angle_tolerance):
+    """
+    Comprueba si dos vectores son colineales.
+
+    :param a: Primer vector.
+    :param b: Segundo vector.
+    :param angle_tolerance: Tolerancia para la comparación en grados.
+    :return:
+        - True si los vectores son colineales.
+        - False en caso contrario.
+    """
+    angle = get_angle(a, b)
+    return (angle <= angle_tolerance) or (abs(angle - 180.0) <= angle_tolerance)
+
+
+def calculate_collinear_edges(proj, angle_tolerance=3.0):
+    """
+    Calcula y añade las aristas indirectas que existen entre vértices colineales.
+
+    Esta función encuentra todos los pares de vértices (u, v) conectados por un camino de
+    aristas colineales y los añade al conjunto de aristas de soporte de la proyección.
+
+    :param proj: Proyección a procesar.
+    :param angle_tolerance: Tolerancia para la colinealidad en grados.
+    """
+    graph = build_projection_graph(proj)
+
+    # Pares (u, v) alcanzables mediante mediante un camino colineal
+    closure = set()
+
+    for u in range(len(proj.points)):
+        for neighbor in graph.adj.get(u, Vertex(u)).neighbors():
+            v = neighbor.name
+            if v == u:
+                continue
+
+            direction = proj.points[v] - proj.points[u]
+            n = np.linalg.norm(direction)
+            if n < 1e-12:
+                continue
+            direction = direction / n if n > 1e-12 else direction
+
+            stack = [v]
+
+            while stack:
+                current = stack.pop()
+                if current in visited:
+                    continue
+
+                closure.add(tuple(sorted((u, current))))
+                visited.add(current)
+
+                for neighbor_next in graph.adj.get(current, Vertex(current)).neighbors():
+                    w = neighbor_next.name
+                    if w in visited:
+                        continue
+
+                    direction_next = proj.points[w] - proj.points[current]
+                    if np.linalg.norm(direction_next) < 1e-12:
+                        continue
+
+                    if is_collinear(direction, direction_next, angle_tolerance) and \
+                            is_collinear(direction, proj.points[w] - proj.points[u], angle_tolerance):
+                        stack.append(w)
+
+    indirect = {tuple(sorted(tuple(edge))) for edge in proj.edges}
+    indirect |= closure
+    proj.indirect_edges = np.array(sorted(indirect), dtype=int)
+
+
+def reconstruct_edges_3d(points_3d, plan_proj, elevation_proj, section_proj, tolerance=1e-2, angle_tolerance=3.0):
     """
     Reconstruye las aristas del modelo 3D a partir de las proyecciones ortogonales.
 
@@ -243,12 +334,19 @@ def reconstruct_edges_3d(points_3d, plan_proj, elevation_proj, section_proj, tol
     :param elevation_proj: Proyección en el plano XY. (alzado)
     :param section_proj: Proyección en el plano YZ. (perfil)
     :param tolerance: Tolerancia para la comparación de coordenadas.
+    :param angle_tolerance: Tolerancia para la detección de aristas colineales.
     :return: Array de aristas 3D reconstruidos del modelo.
     """
-    plan_unique = {tuple(sorted(edge)) for edge in plan_proj.edges}
-    elevation_unique = {tuple(sorted(edge)) for edge in elevation_proj.edges}
-    section_unique = {tuple(sorted(edge)) for edge in section_proj.edges}
+    # Crear conjuntos de aristas visibles y ocultas para cada vista
+    plan_visible = {tuple(sorted(edge)) for edge in plan_proj.edges}
+    elevation_visible = {tuple(sorted(edge)) for edge in elevation_proj.edges}
+    section_visible = {tuple(sorted(edge)) for edge in section_proj.edges}
 
+    plan_indirect = {tuple(sorted(edge)) for edge in getattr(plan_proj, "indirect_edges", plan_proj.edges)}
+    elevation_indirect = {tuple(sorted(edge)) for edge in getattr(elevation_proj, "indirect_edges", elevation_proj.edges)}
+    section_indirect = {tuple(sorted(edge)) for edge in getattr(section_proj, "indirect_edges", section_proj.edges)}
+
+    # Mapear puntos 3D a índices 2D en cada vista
     plan_index_map = {}
     elevation_index_map = {}
     section_index_map = {}
@@ -292,15 +390,40 @@ def reconstruct_edges_3d(points_3d, plan_proj, elevation_proj, section_proj, tol
             i_elev, j_elev = elevation_index_map[u], elevation_index_map[v]
             i_section, j_section = section_index_map[u], section_index_map[v]
 
-            # Comprobar si la proyección es un borde o un punto en cada vista
-            plan_valid = (i_plan == j_plan) or (tuple(sorted((i_plan, j_plan))) in plan_unique)
-            elevation_valid = (i_elev == j_elev) or (tuple(sorted((i_elev, j_elev))) in elevation_unique)
-            section_valid = (i_section == j_section) or (tuple(sorted((i_section, j_section))) in section_unique)
+            # Comprobar si la proyección es una arista (visible u oculta) o un punto en cada vista
+            plan_edge = tuple(sorted((i_plan, j_plan)))
+            elevation_edge = tuple(sorted((i_elev, j_elev)))
+            section_edge = tuple(sorted((i_section, j_section)))
 
-            if plan_valid and elevation_valid and section_valid:
+            # Arista directa (visible u oculta) en cada vista
+            plan_is_direct = plan_edge in plan_visible
+            elevation_is_direct = elevation_edge in elevation_visible
+            section_is_direct = section_edge in section_visible
+
+            # Comprobar si corresponde con un punto
+            plan_is_point = (i_plan == j_plan)
+            elevation_is_point = (i_elev == j_elev)
+            section_is_point = (i_section == j_section)
+
+            # Arista indirecta en cada vista
+            plan_is_indirect = plan_edge in plan_indirect
+            elevation_is_indirect = elevation_edge in elevation_indirect
+            section_is_indirect = section_edge in section_indirect
+
+            # La vista es compatible si es arista directa, punto o arista indirecta
+            plan_valid = plan_is_point or plan_is_indirect
+            elevation_valid = elevation_is_point or elevation_is_indirect
+            section_valid = section_is_point or section_is_indirect
+
+            # Contar las vistas válidas y en las que aparece la arista como visible
+            all_valid_views = plan_valid and elevation_valid and section_valid
+            edge_is_direct = plan_is_direct or elevation_is_direct or section_is_direct
+
+            # Arista visible presente en todas las vistas
+            if all_valid_views:
                 edges_3d.add(tuple(sorted((u, v))))
 
-    return np.array(list(edges_3d), dtype=int)
+    return np.array(sorted(edges_3d), dtype=int)
 
 
 def check_projection_connectivity(projections):
@@ -324,9 +447,9 @@ def check_projection_connectivity(projections):
         degrees = np.zeros(len(proj.points), dtype=int)
 
         # Contar conexiones para cada punto según las aristas
-        for edge in proj.edges:
-            degrees[edge[0]] += 1
-            degrees[edge[1]] += 1
+        for u, v in proj.edges:
+            degrees[u] += 1
+            degrees[v] += 1
 
         # Verificar si existe algún punto con una única conexión (grado 1)
         for idx, deg in enumerate(degrees):
@@ -486,11 +609,13 @@ def find_cycles(proj: Projection):
     # Construir un grafo no dirigido
     graph = nx.Graph()
     graph.add_nodes_from(range(len(proj.points)))
-    graph.add_edges_from(proj.edges)
+
+    edges = getattr(proj, "indirect_edges", proj.edges)
+    graph.add_edges_from([tuple(sorted(edge)) for edge in edges])
 
     # Encontrar los ciclos
     try:
-        cycles = list(nx.chordless_cycles(graph))
+        cycles = nx.chordless_cycles(graph)
         return cycles
     except nx.NetworkXError as e:
         print(f"Error al encontrar los ciclos del grafo en la vista {proj.name}: {e}")
@@ -601,6 +726,63 @@ def is_face_coplanar(face, points, tolerance=1e-2):
     return True
 
 
+def is_face_geometry_valid(face, points, tolerance=1e-2):
+    """
+    Valida la geometría de la cara mediante la suma de ángulos.
+
+    Una cara válida debe tener una suma de giros de 360 grados, mientras que
+    una cara que se intersecta a sí misma será cercana a 0.
+
+    :param face: Tupla con los índices de los vértices que componen la cara.
+    :param points: Array de puntos 3D.
+    :param tolerance: Tolerancia para la suma de ángulos.
+    :return:
+        - True si la geometría de la cara es válida.
+        - False en caso contrario.
+    """
+    if len(face) < 3:
+        return False
+
+    face_points = points[face]
+
+    # Proyectar la cara 3D a un plano 2D
+    p0, p1, p2 = face_points[:3]
+    normal = np.cross(p1 - p0, p2 - p0)
+    if np.linalg.norm(normal) < 1e-9:
+        return False
+
+    # Descartar eje perpendicular
+    normal_absolute = np.abs(normal)
+    if normal_absolute[0] > normal_absolute[1] and normal_absolute[0] > normal_absolute[2]:
+        points_2d = face_points[:, [1, 2]]
+    elif normal_absolute[1] > normal_absolute[2]:
+        points_2d = face_points[:, [0, 2]]
+    else:
+        points_2d = face_points[:, [0, 1]]
+
+    # Calcular la suma total de los giros en cada vértice
+    total_angle = 0.0
+    for i in range(len(face)):
+        p_prev = points_2d[i - 1]
+        p_current = points_2d[i]
+        p_next = points_2d[(i + 1) % len(face)]
+
+        # Obtener ángulo de cada vector respecto al origen
+        v1 = p_prev - p_current
+        v2 = p_next - p_current
+        angle = math.atan2(v2[1], v2[0]) - math.atan2(v1[1], v1[0])
+
+        # Normalizar el ángulo a [-180, 180]
+        if angle > math.pi:
+            angle -= 2 * math.pi
+        elif angle < -math.pi:
+            angle += 2 * math.pi
+
+        total_angle += angle
+
+    return abs(abs(total_angle) - 2 * math.pi) < tolerance
+
+
 def cycles_to_faces(proj: Projection, cycles, points_3d, edges_3d, matching_tolerance, geometry_tolerance):
     """
     Convierte los ciclos 2D de una proyección en caras 3D.
@@ -616,7 +798,7 @@ def cycles_to_faces(proj: Projection, cycles, points_3d, edges_3d, matching_tole
     axis = int(np.argmax(proj.normal))
     mask = tuple(i for i in range(3) if i != axis)
 
-    unique_edges = {tuple(sorted(e)) for e in edges_3d}
+    unique_edges = {tuple(sorted(edge)) for edge in edges_3d}
 
     # Relacionar cada punto 2D con sus posibles puntos 3D
     candidates = [[] for _ in range(len(proj.points))]
@@ -649,6 +831,10 @@ def cycles_to_faces(proj: Projection, cycles, points_3d, edges_3d, matching_tole
             if not is_face_coplanar(list(candidate_face), points_3d, geometry_tolerance):
                 continue
 
+            # Validar geometría
+            if not is_face_geometry_valid(list(candidate_face), points_3d, geometry_tolerance):
+                continue
+
             # Añadir la cara a la lista
             key = tuple(sorted(candidate_face))
             if key not in unique_faces:
@@ -660,7 +846,7 @@ def cycles_to_faces(proj: Projection, cycles, points_3d, edges_3d, matching_tole
     return faces
 
 
-def filter_invalid_vertices(points_3d, edges_3d, min_degree=3):
+def filter_invalid_vertices(points_3d, edges_3d, min_degree=2):
     """
     Filtra los vértices que no cumplen con un grado mínimo de conectividad.
 
@@ -704,290 +890,185 @@ def filter_invalid_vertices(points_3d, edges_3d, min_degree=3):
     return filtered_points, np.array(filtered_edges, dtype=int)
 
 
-def align_view(points, edges, tolerance=5.0):
+def align_view(points, edges, angle_tolerance=3.0, line_tolerance=3.0):
     """
     Corrige los puntos de la vista para garantizar la ortogonalidad de las aristas.
 
     :param points: Array de puntos 2D de la vista.
     :param edges: Array de aristas que conectan los puntos.
-    :param tolerance: Tolerancia en grados para considerar aristas como horizontales o verticales.
+    :param angle_tolerance: Tolerancia en grados para considerar aristas como horizontales o verticales.
+    :param line_tolerance: Tolerancia en píxeles para agrupar puntos en la misma línea.
     :return: Lista de puntos alineados.
     """
-    if len(points) == 0:
+    if points is None or len(points) == 0 or edges is None or len(edges) == 0:
         return points
 
-    candidates_x = [[] for _ in range(len(points))]
-    candidates_y = [[] for _ in range(len(points))]
+    aligned_points = points.copy()
+
+    horizontal = set()
+    vertical = set()
 
     # Identificar aristas horizontales y verticales
     for u, v in edges:
         p1, p2 = points[u], points[v]
         dx, dy = p2[0] - p1[0], p2[1] - p1[1]
 
-        angle = math.degrees(math.atan2(dy, dx))
+        angle = abs(math.degrees(math.atan2(dy, dx)))
 
         # Comprobar si es horizontal
-        if abs(angle) < tolerance or abs(abs(angle) - 180) < tolerance:
-            average_y = (p1[1] + p2[1]) / 2.0
-            candidates_y[u].append(average_y)
-            candidates_y[v].append(average_y)
+        if min(angle, 180.0 - angle) <= angle_tolerance:
+            horizontal.add(u)
+            horizontal.add(v)
 
         # Comprobar si es vertical
-        elif abs(abs(angle) - 90) < tolerance:
-            average_x = (p1[0] + p2[0]) / 2.0
-            candidates_x[u].append(average_x)
-            candidates_x[v].append(average_x)
+        elif abs(angle - 90.0) <= angle_tolerance:
+            vertical.add(u)
+            vertical.add(v)
 
-    # Corregir los puntos según lo calculado
-    aligned_points = points.copy()
-    for i in range(len(points)):
-        if candidates_x[i]:
-            aligned_points[i, 0] = np.mean(candidates_x[i])
-        if candidates_y[i]:
-            aligned_points[i, 1] = np.mean(candidates_y[i])
+    # Agrupar los puntos por coordenada
+    def align_axis(vertices, axis):
+        if not vertices:
+            return
+
+        ordered_vertices = sorted(list(vertices), key=lambda i: aligned_points[i, axis])
+
+        groups = []
+        current_group = [ordered_vertices[0]]
+
+        for i in range(1, len(ordered_vertices)):
+            current_idx = ordered_vertices[i]
+            prev_idx = current_group[-1]
+
+            # Calcular distancia al último punto del grupo actual
+            distance = abs(aligned_points[current_idx, axis] - aligned_points[prev_idx, axis])
+
+            if distance <= line_tolerance:
+                current_group.append(current_idx)
+            else:
+                groups.append(current_group)
+                current_group = [current_idx]
+
+        groups.append(current_group)
+
+        for group in groups:
+            mean = np.mean([aligned_points[j, axis] for j in group])
+            for j in group:
+                aligned_points[j, axis] = mean
+
+    align_axis(vertical, axis=0)
+    align_axis(horizontal, axis=1)
 
     return aligned_points
 
 
-SEGMENT1 = (
-    np.array([(0, 0, 0), (1, 1, 1)]),
-    np.array([(0, 1)])
-)
-SEGMENT2 = (
-    np.array([(0, 0, 0), (1, 1, 0)]),
-    np.array([(0, 1)])
-)
-SEGMENT3 = (
-    np.array([(0, 0, 0), (1, 0, 0)]),
-    np.array([(0, 1)])
-)
+def rotate_points(points, angle):
+    """
+    Rota un conjunto de puntos alrededor del origen un ángulo en grados.
 
-TRIANGLE1 = (
-    np.array([(-1, 0, -1), (0, 1, 1), (1, 0, 0)]),
-    np.array([(0, 1), (1, 2), (2, 0)])
-)
-TRIANGLE2 = (
-    np.array([(-1, 0, 0), (0, 1, 1), (1, 0, 0)]),
-    np.array([(0, 1), (1, 2), (2, 0)])
-)
-TRIANGLE3 = (
-    np.array([(-1, 0, 0), (0, 1, 0), (1, 0, 0)]),
-    np.array([(0, 1), (1, 2), (2, 0)])
-)
-TRIANGLE4 = (
-    np.array([(0, 0, 0), (1, 0, 0), (0, 1, 0)]),
-    np.array([(0, 1), (1, 2), (2, 0)])
-)
+    :param points: Array de puntos 2D.
+    :param angle: Ángulo de rotación en grados.
+    :return: Array de puntos rotados.
+    """
+    if points is None or len(points) == 0:
+        return points
 
-CUBE = (
-    np.array([
-        (0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),  # Cara inferior
-        (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1)  # Cara superior
-    ]),
-    np.array([
-        (0, 1), (1, 2), (2, 3), (3, 0),  # Aristas de la cara inferior
-        (4, 5), (5, 6), (6, 7), (7, 4),  # Aristas de la cara superior
-        (0, 4), (1, 5), (2, 6), (3, 7)  # Aristas laterales
-    ])
-)
+    radians = math.radians(angle)
+    rotation_matrix = np.array([
+        [np.cos(radians), -np.sin(radians)],
+        [np.sin(radians), np.cos(radians)]
+    ], dtype=float)
 
-ROTATED_CUBE = (
-    np.array([
-        (0, 0, 0), (np.sqrt(2) / 2, 0, -np.sqrt(2) / 2), (np.sqrt(2) / 2, 1, -np.sqrt(2) / 2), (0, 1, 0),
-        (np.sqrt(2) / 2, 0, np.sqrt(2) / 2), (np.sqrt(2), 0, 0), (np.sqrt(2), 1, 0), (np.sqrt(2) / 2, 1, np.sqrt(2) / 2)
-    ]),
-    np.array([
-        (0, 1), (1, 2), (2, 3), (3, 0),
-        (4, 5), (5, 6), (6, 7), (7, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7)
-    ])
-)
+    return np.dot(points, rotation_matrix.T)
 
-PYRAMID = (
-    np.array([
-        (0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),  # Base
-        (0.5, 0.5, 1)  # Vértice superior (apex)
-    ]),
-    np.array([
-        (0, 1), (1, 2), (2, 3), (3, 0),  # Aristas de la base
-        (0, 4), (1, 4), (2, 4), (3, 4)  # Conexiones al vértice superior
-    ])
-)
 
-IRREGULAR = (
-    np.array([
-        (0, 0, 0), (2, 0, 0), (2, 1, 0), (0, 1, 0),  # Cara inferior
-        (0.5, 0.5, 2), (1.5, 0.5, 2)  # Puntos superiores
-    ]),
-    np.array([
-        (0, 1), (1, 2), (2, 3), (3, 0),  # Aristas de la cara inferior
-        (0, 4), (1, 5), (2, 5), (3, 4),  # Aristas laterales
-        (4, 5)  # Arista superior
-    ])
-)
+def evaluate_rotation(points, edges):
+    """
+    Estima el ángulo de rotación principal de una vista y el grado de alineación de sus aristas.
 
-INCONSISTENT = (
-    np.array([
-        (0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
-        (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1),
-        (0.5, 0.5, 0.5)  # Punto inconsistente
-    ]),
-    np.array([
-        (0, 1), (1, 2), (2, 3), (3, 0),
-        (4, 5), (5, 6), (6, 7), (7, 4),
-        (0, 4), (1, 5), (2, 6), (3, 7),
-        (0, 8), (4, 8)  # Aristas conectadas al punto inconsistente
-    ])
-)
+    :param points: Array de puntos 2D.
+    :param edges: Array de aristas.
+    :return: Tupla con el ángulo de rotación en grados y el grado de alineación (0 a 1).
+    """
+    if points is None or len(points) == 0 or edges is None or len(edges) == 0:
+        return 0.0, 0.0
 
-TRIANGULAR_PRISM = (
-    np.array([
-        [0, 0, 0],  # Vértices del triángulo inferior
-        [1, 0, 0],
-        [0.5, 1, 0],
-        [0, 0, 1],  # Vértices del triángulo superior
-        [1, 0, 1],
-        [0.5, 1, 1]
-    ]),
-    np.array([
-        (0, 1), (1, 2), (2, 0),  # Aristas del triángulo inferior
-        (3, 4), (4, 5), (5, 3),  # Aristas del triángulo superior
-        (0, 3), (1, 4), (2, 5)  # Aristas laterales que conectan ambos triángulos
-    ])
-)
+    angles = []
+    weights = []
 
-HEXAGONAL_PRISM = (
-    np.array([
-        [math.cos(0), math.sin(0), 0],
-        [math.cos(math.pi / 3), math.sin(math.pi / 3), 0],
-        [math.cos(2 * math.pi / 3), math.sin(2 * math.pi / 3), 0],
-        [math.cos(math.pi), math.sin(math.pi), 0],
-        [math.cos(4 * math.pi / 3), math.sin(4 * math.pi / 3), 0],
-        [math.cos(5 * math.pi / 3), math.sin(5 * math.pi / 3), 0],
-        [math.cos(0), math.sin(0), 1],
-        [math.cos(math.pi / 3), math.sin(math.pi / 3), 1],
-        [math.cos(2 * math.pi / 3), math.sin(2 * math.pi / 3), 1],
-        [math.cos(math.pi), math.sin(math.pi), 1],
-        [math.cos(4 * math.pi / 3), math.sin(4 * math.pi / 3), 1],
-        [math.cos(5 * math.pi / 3), math.sin(5 * math.pi / 3), 1],
-    ]),
-    np.array([
-        (0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (5, 0),  # Aristas de la base inferior
-        (6, 7), (7, 8), (8, 9), (9, 10), (10, 11), (11, 6),  # Aristas de la base superior
-        (0, 6), (1, 7), (2, 8), (3, 9), (4, 10), (5, 11)  # Conexiones verticales
-    ])
-)
+    # Extraer ángulos y pesos (longitud) de cada arista
+    for u, v in edges:
+        p1, p2 = points[u], points[v]
+        dx, dy = p2[0] - p1[0], p2[1] - p1[1]
 
-OCTAHEDRON = (
-    np.array([
-        [1, 0, 0],  # A (índice 0)
-        [-1, 0, 0],  # B (índice 1)
-        [0, 1, 0],  # C (índice 2)
-        [0, -1, 0],  # D (índice 3)
-        [0, 0, 1],  # E (índice 4, polo superior)
-        [0, 0, -1]  # F (índice 5, polo inferior)
-    ]),
-    np.array([
-        (4, 0), (4, 1), (4, 2), (4, 3),  # Conexiones del polo superior
-        (5, 0), (5, 1), (5, 2), (5, 3),  # Conexiones del polo inferior
-        (0, 2), (2, 1), (1, 3), (3, 0)  # Conexiones entre vértices equatoriales
-    ])
-)
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            continue
 
-DISCONNECTED_LINES = (
-    np.array([
-        [0, 0, 0],  # Primer segmento
-        [1, 1, 1],
-        [2, 2, 2],  # Segundo segmento
-        [3, 3, 3]
-    ]),
-    np.array([
-        (0, 1),  # Arista del primer segmento
-        (2, 3)  # Arista del segundo segmento
-    ])
-)
+        angle = math.degrees(math.atan2(dy, dx))
+        angles.append(angle)
+        weights.append(length)
 
-HOUSE = (
-    np.array([
-        [0, 0, 0],  # Base inferior del cubo
-        [1, 0, 0],
-        [1, 1, 0],
-        [0, 1, 0],
-        [0, 0, 1],  # Parte superior del cubo
-        [1, 0, 1],
-        [1, 1, 1],
-        [0, 1, 1],
-        [0.5, 0.5, 1.5]  # Vértice del techo (pirámide sobre el cubo)
-    ]),
-    np.array([
-        (0, 1), (1, 2), (2, 3), (3, 0),  # Aristas de la base inferior
-        (4, 5), (5, 6), (6, 7), (7, 4),  # Aristas de la parte superior (cubo)
-        (0, 4), (1, 5), (2, 6), (3, 7),  # Aristas verticales del cubo
-        (8, 4), (8, 5), (8, 6), (8, 7)  # Aristas del techo
-    ])
-)
+    if not angles:
+        return 0.0, 0.0
+
+    # Mapear los ángulos al rango [-360, 360]
+    doubled_angles = np.radians(np.array(angles, dtype=float) * 2.0)
+
+    # Normalizar los pesos
+    weights = np.array(weights, dtype=float)
+    weight_total = weights.sum()
+    if weight_total <= 0.0:
+        return 0.0, 0.0
+    normalized_weights = weights / weight_total
+
+    # Calcular el vector promedio ponderado
+    mean_cos = float(np.sum(normalized_weights * np.cos(doubled_angles)))
+    mean_sin = float(np.sum(normalized_weights * np.sin(doubled_angles)))
+
+    # Calcular el grado de alineación (0 -> aleatoria, 1 -> perfecta)
+    alignment_value = math.hypot(mean_cos, mean_sin)
+
+    # Volver al espacio de ángulos original
+    mean_doubled_angle = math.atan2(mean_sin, mean_cos)
+    angle = math.degrees(mean_doubled_angle / 2.0)
+
+    # Ajustar el ángulo para obtener la rotación más corta hacia el eje más cercano
+    angle = (angle + 90.0) % 180.0 - 90.0
+    if angle >= 45.0:
+        angle -= 90.0
+    elif angle < -45.0:
+        angle += 90.0
+
+    return angle, alignment_value
+
+
+def align_view_auto(points, edges, angle_tolerance=5.0, line_tolerance=5.0, rotation_threshold=0.2):
+    """
+    Detecta y corrige automáticamente la rotación de una vista para alinearla con los ejes.
+
+    :param points: Array de puntos 2D de la vista.
+    :param edges: Array de aristas de la vista.
+    :param angle_tolerance: Tolerancia en grados para considerar aristas como horizontales o verticales.
+    :param line_tolerance: Tolerancia en píxeles para agrupar puntos en la misma línea.
+    :param rotation_threshold: Umbral para aplicar la rotación.
+    :return: Array de puntos con la alineación corregida.
+    """
+    if points is None or len(points) == 0 or edges is None or len(edges) == 0:
+        return points
+
+    angle, rotation_value = evaluate_rotation(points, edges)
+    if rotation_value < rotation_threshold:
+        return align_view(points, edges, angle_tolerance=angle_tolerance, line_tolerance=line_tolerance)
+
+    points_rotated = rotate_points(points, -angle)
+    points_aligned = align_view(points_rotated, edges, angle_tolerance=angle_tolerance, line_tolerance=line_tolerance)
+    points_original = rotate_points(points_aligned, angle)
+
+    return points_original
 
 
 def main():
-    shapes = [
-        ("SEGMENT1", SEGMENT1),
-        ("SEGMENT2", SEGMENT2),
-        ("SEGMENT3", SEGMENT3),
-        ("TRIANGLE1", TRIANGLE1),
-        ("TRIANGLE2", TRIANGLE2),
-        ("TRIANGLE3", TRIANGLE3),
-        ("TRIANGLE4", TRIANGLE4),
-        ("CUBE", CUBE),
-        ("ROTATED_CUBE", ROTATED_CUBE),
-        ("PYRAMID", PYRAMID),
-        ("IRREGULAR", IRREGULAR),
-        ("INCONSISTENT", INCONSISTENT),
-        ("TRIANGULAR_PRISM", TRIANGULAR_PRISM),
-        ("HEXAGONAL_PRISM", HEXAGONAL_PRISM),
-        ("OCTAHEDRON", OCTAHEDRON),
-        ("DISCONNECTED_LINES", DISCONNECTED_LINES),
-        ("HOUSE", HOUSE)
-    ]
-
-    for name, shape in shapes:
-        print(f"\n=== Procesando forma: {name} ===")
-
-        # Obtener vértices y aristas de la forma
-        points_3d, edges_3d = shape
-
-        # Generar las proyecciones ortogonales
-        plan, elevation, section = project_cloud(points_3d, edges_3d)
-
-        # Verificar la conectividad de cada proyección
-        if not check_projection_connectivity((plan, elevation, section)):
-            print("Inconsistencia en la conectividad de las proyecciones.")
-            continue
-
-        plan_cycles = find_cycles(plan)
-        elevation_cycles = find_cycles(elevation)
-        section_cycles = find_cycles(section)
-
-        all_faces = []
-        all_faces += cycles_to_faces(plan, plan_cycles, points_3d, edges_3d)
-        all_faces += cycles_to_faces(elevation, elevation_cycles, points_3d, edges_3d)
-        all_faces += cycles_to_faces(section, section_cycles, points_3d, edges_3d)
-
-        # Comprobar la consistencia global del modelo 3D reconstruido
-        if not check_model_consistency(points_3d, edges_3d):
-            print("Inconsistencia global en el modelo 3D reconstruido.")
-            continue
-
-        unique_faces = set()
-        faces = []
-        for face in all_faces:
-            key = tuple(sorted(face))
-            if key not in unique_faces:
-                faces.append(face)
-                unique_faces.add(key)
-
-        # Visualizar el modelo 3D
-        print(f"Puntos 3D: {len(points_3d)}, Aristas 3D: {len(edges_3d)}, Caras: {len(faces)}")
-        plot_3d_mesh(points_3d, faces)
+    return
 
 
 if __name__ == '__main__':

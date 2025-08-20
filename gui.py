@@ -15,11 +15,13 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 from pathlib import Path
 from tkinter import filedialog as fd, ttk, messagebox
+from tkinterdnd2 import DND_FILES, TkinterDnD
 
 from main import (
     get_points_and_edges_from_contours,
     normalize_and_scale_views,
-    export_obj
+    export_obj,
+    get_view_scale
 )
 
 from vistas import (
@@ -30,8 +32,8 @@ from vistas import (
     check_model_consistency,
     find_cycles,
     cycles_to_faces,
-    align_view,
-    filter_invalid_vertices
+    calculate_collinear_edges,
+    align_view_auto
 )
 
 APP_TITLE = "visione"
@@ -39,7 +41,7 @@ PREFERENCES_FILE = Path.home() / ".visione_prefs.json"
 PADDING = 10
 
 
-class Application(tk.Tk):
+class Application(TkinterDnD.Tk):
     def __init__(self):
         super().__init__()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -64,10 +66,10 @@ class Application(tk.Tk):
         self.load_preferences()
 
         self.front_path = tk.StringVar()
-        self.left_path = tk.StringVar()
+        self.right_path = tk.StringVar()
         self.top_path = tk.StringVar()
 
-        for var in (self.front_path, self.left_path, self.top_path):
+        for var in (self.front_path, self.right_path, self.top_path):
             var.trace_add("write", lambda *args: self.on_path_change())
 
         self.noise_threshold = tk.IntVar(value=100)
@@ -106,15 +108,31 @@ class Application(tk.Tk):
         # Cargar imágenes
         ttk.Button(header, text="Cargar alzado",
                    command=lambda: self.add_file(self.front_path)).grid(row=0, column=0, padx=PADDING, sticky="ew")
-        ttk.Entry(header, textvariable=self.front_path).grid(row=0, column=1, sticky="ew")
+        self.front_entry = ttk.Entry(header, textvariable=self.front_path)
+        self.front_entry.grid(row=0, column=1, sticky="ew")
 
         ttk.Button(header, text="Cargar planta",
                    command=lambda: self.add_file(self.top_path)).grid(row=1, column=0, padx=PADDING, sticky="ew")
-        ttk.Entry(header, textvariable=self.top_path).grid(row=1, column=1, sticky="ew")
+        self.top_entry = ttk.Entry(header, textvariable=self.top_path)
+        self.top_entry.grid(row=1, column=1, sticky="ew")
 
         ttk.Button(header, text="Cargar perfil",
-                   command=lambda: self.add_file(self.left_path)).grid(row=2, column=0, padx=PADDING, sticky="ew")
-        ttk.Entry(header, textvariable=self.left_path).grid(row=2, column=1, sticky="ew")
+                   command=lambda: self.add_file(self.right_path)).grid(row=2, column=0, padx=PADDING, sticky="ew")
+        self.left_entry = ttk.Entry(header, textvariable=self.right_path)
+        self.left_entry.grid(row=2, column=1, sticky="ew")
+
+        # Permitir drag-and-drop de una vista
+        for widget, target in [
+            (self.front_entry, self.front_path),
+            (self.top_entry, self.top_path),
+            (self.left_entry, self.right_path)
+        ]:
+            widget.drop_target_register(DND_FILES)
+            widget.dnd_bind('<<Drop>>', lambda e, t=target: self.on_drop_file(e, target=t))
+
+        # Permitir drag-and-drop de todos los archivos
+        self.drop_target_register(DND_FILES)
+        self.dnd_bind('<<Drop>>', self.on_drop_anywhere)
 
         # Introducir parámetros
         params = ttk.LabelFrame(header, text="Parámetros de reconstrucción", padding=PADDING)
@@ -267,6 +285,47 @@ class Application(tk.Tk):
             # Habilitar parámetros
             self.update_params()
 
+    def split_paths(self, data):
+        paths = self.tk.splitlist(data)
+        return [os.path.normpath(p) for p in paths]
+
+    def auto_assign(self, paths, overwrite=False):
+        mapping = {
+            "front": self.front_path, "elevation": self.front_path, "alzado": self.front_path,
+            "top": self.top_path, "plan": self.top_path, "planta": self.top_path,
+            "right": self.right_path, "section": self.right_path, "perfil": self.right_path
+        }
+
+        assigned = set()
+
+        for p in paths:
+            name = os.path.splitext(os.path.basename(p))[0].lower()
+            for key, var in mapping.items():
+                if key in name and (overwrite or var.get() == ""):
+                    var.set(p)
+                    assigned.add(p)
+                    break
+
+    def on_drop_file(self, event, target=None):
+        paths = self.split_paths(event.data)
+        if not paths:
+            return
+
+        if target is not None and len(paths) == 1:
+            target.set(paths[0])
+        else:
+            self.auto_assign(paths, overwrite=True)
+
+        self.on_path_change()
+
+    def on_drop_anywhere(self, event):
+        paths = self.split_paths(event.data)
+        if not paths:
+            return
+
+        self.auto_assign(paths, overwrite=True)
+        self.on_path_change()
+
     def reconstruct_async(self):
         # Establecer estado de la aplicación
         self.cancel_event.clear()
@@ -300,7 +359,7 @@ class Application(tk.Tk):
     def reconstruct(self):
         # Validar rutas
         if not (os.path.isfile(self.front_path.get())
-                and os.path.isfile(self.left_path.get())
+                and os.path.isfile(self.right_path.get())
                 and os.path.isfile(self.top_path.get())):
             self.log("Debes cargar las imágenes de todas las vistas.", error=True)
             self.after(0, lambda: messagebox.showwarning(APP_TITLE, "No se han cargado las imágenes de las vistas."))
@@ -310,7 +369,7 @@ class Application(tk.Tk):
 
         # Cargar imágenes de vistas
         front_view = cv2.imread(self.front_path.get())
-        left_view = cv2.imread(self.left_path.get())
+        left_view = cv2.imread(self.right_path.get())
         top_view = cv2.imread(self.top_path.get())
         if front_view is None or left_view is None or top_view is None:
             self.log("Error al leer una o más imágenes. Comprueba el formato.", error=True)
@@ -342,9 +401,9 @@ class Application(tk.Tk):
             self.check_finish_reconstruction()
 
             # Corregir ortogonalidad de las vistas
-            front_points_2d = align_view(front_points_2d, front_edges_2d)
-            left_points_2d = align_view(left_points_2d, left_edges_2d)
-            top_points_2d = align_view(top_points_2d, top_edges_2d)
+            front_points_2d = align_view_auto(front_points_2d, front_edges_2d)
+            left_points_2d = align_view_auto(left_points_2d, left_edges_2d)
+            top_points_2d = align_view_auto(top_points_2d, top_edges_2d)
 
             # Invertir el eje vertical del modelo
             if len(front_points_2d) > 0:
@@ -380,18 +439,23 @@ class Application(tk.Tk):
             section = Projection(left_points_2d, left_edges_2d, np.array([1, 0, 0]), 'section')
             plan = Projection(top_points_2d, top_edges_2d, np.array([0, 1, 0]), 'plan')
 
+            # Construir soporte colineal en cada vista
+            calculate_collinear_edges(plan)
+            calculate_collinear_edges(elevation)
+            calculate_collinear_edges(section)
+
             # Verificar la conectividad de cada proyección
             if not check_projection_connectivity((plan, elevation, section)):
                 self.log("Conectividad inconsistente. Los puntos deben tener al menos dos conexiones.", error=True)
-                self.after(0, lambda: messagebox.showwarning(APP_TITLE, "Inconsistencia en la conectividad de las proyecciones."))
+                self.after(0, lambda: messagebox.showwarning(APP_TITLE,
+                                                             "Inconsistencia en la conectividad de las proyecciones."))
                 return
 
             # Calcular tolerancias en función de la diagonal del alzado
-            point_min, point_max = np.min(front_points_2d, axis=0), np.max(front_points_2d, axis=0)
-            diagonal = float(np.linalg.norm(point_max - point_min))
+            scale = max(get_view_scale(front_points_2d), get_view_scale(left_points_2d), get_view_scale(top_points_2d))
 
-            matching_tolerance = diagonal * (self.matching_tolerance.get() / 100.0)
-            geometry_tolerance = diagonal * (self.geometry_tolerance.get() / 100.0)
+            matching_tolerance = scale * (self.matching_tolerance.get() / 100.0)
+            geometry_tolerance = scale * (self.geometry_tolerance.get() / 100.0)
             self.log(f"Tolerancia de emparejamiento: {matching_tolerance:.2f} "
                      f"| Tolerancia geométrica: {geometry_tolerance:.2f}")
 
@@ -414,9 +478,6 @@ class Application(tk.Tk):
             # Comprobar cancelación de reconstrucción por el usuario
             self.check_finish_reconstruction()
 
-            # Limpiar el modelo por grado mínimo de sus vértices
-            points_3d, edges_3d = filter_invalid_vertices(points_3d, edges_3d, min_degree=3)
-
             # Encontrar ciclos
             plan_cycles = find_cycles(plan)
             elevation_cycles = find_cycles(elevation)
@@ -430,7 +491,8 @@ class Application(tk.Tk):
             all_faces.extend(
                 cycles_to_faces(plan, plan_cycles, points_3d, edges_3d, matching_tolerance, geometry_tolerance))
             all_faces.extend(
-                cycles_to_faces(elevation, elevation_cycles, points_3d, edges_3d, matching_tolerance, geometry_tolerance))
+                cycles_to_faces(elevation, elevation_cycles, points_3d, edges_3d, matching_tolerance,
+                                geometry_tolerance))
             all_faces.extend(
                 cycles_to_faces(section, section_cycles, points_3d, edges_3d, matching_tolerance, geometry_tolerance))
 
@@ -553,7 +615,7 @@ class Application(tk.Tk):
 
     def paths_ready(self):
         return (os.path.isfile(self.front_path.get())
-                and os.path.isfile(self.left_path.get())
+                and os.path.isfile(self.right_path.get())
                 and os.path.isfile(self.top_path.get()))
 
     def update_buttons(self):
