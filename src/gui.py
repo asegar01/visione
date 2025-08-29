@@ -76,6 +76,8 @@ class Application(TkinterDnD.Tk):
         self.vertex_distance = tk.IntVar(value=15)
         self.matching_tolerance = tk.DoubleVar(value=5.0)
         self.geometry_tolerance = tk.DoubleVar(value=3.0)
+        self.kernel_shape = tk.IntVar(value=0)
+        self.approx_ratio = tk.DoubleVar(value=1.0)
 
         self.front_points_2d, self.front_edges_2d = np.array([]), np.array([])
         self.left_points_2d, self.left_edges_2d = np.array([]), np.array([])
@@ -109,17 +111,17 @@ class Application(TkinterDnD.Tk):
         ttk.Button(header, text="Cargar alzado",
                    command=lambda: self.add_file(self.front_path)).grid(row=0, column=0, padx=PADDING, sticky="ew")
         self.front_entry = ttk.Entry(header, textvariable=self.front_path)
-        self.front_entry.grid(row=0, column=1, sticky="ew")
+        self.front_entry.grid(row=0, column=1, padx=10, sticky="ew")
 
         ttk.Button(header, text="Cargar planta",
                    command=lambda: self.add_file(self.top_path)).grid(row=1, column=0, padx=PADDING, sticky="ew")
         self.top_entry = ttk.Entry(header, textvariable=self.top_path)
-        self.top_entry.grid(row=1, column=1, sticky="ew")
+        self.top_entry.grid(row=1, column=1, padx=10, sticky="ew")
 
         ttk.Button(header, text="Cargar perfil",
                    command=lambda: self.add_file(self.right_path)).grid(row=2, column=0, padx=PADDING, sticky="ew")
         self.left_entry = ttk.Entry(header, textvariable=self.right_path)
-        self.left_entry.grid(row=2, column=1, sticky="ew")
+        self.left_entry.grid(row=2, column=1, padx=10, sticky="ew")
 
         # Permitir drag-and-drop de una vista
         for widget, target in [
@@ -135,8 +137,8 @@ class Application(TkinterDnD.Tk):
         self.dnd_bind('<<Drop>>', self.on_drop_anywhere)
 
         # Introducir parámetros
-        params = ttk.LabelFrame(header, text="Parámetros de reconstrucción", padding=PADDING)
-        params.grid(row=0, column=2, rowspan=3, columnspan=2, padx=PADDING, pady=PADDING, sticky="ew")
+        params = ttk.LabelFrame(header, text="Parámetros de reconstrucción", padding=PADDING / 2)
+        params.grid(row=0, column=2, rowspan=3, columnspan=2, padx=PADDING * 4, pady=PADDING, sticky="ew")
         for i in range(2):
             params.columnconfigure(i, weight=1)
 
@@ -174,18 +176,36 @@ class Application(TkinterDnD.Tk):
         self.geometry_tolerance_label = ttk.Label(params, text=f"{self.geometry_tolerance.get():.1f}%")
         self.geometry_tolerance_label.grid(row=3, column=2, sticky="w")
 
+        ttk.Label(params, text="Aproximación de contorno (%)").grid(row=4, column=0, sticky="w")
+        self.approx_scale = ttk.Scale(params, from_=0.0, to=5.0, orient="horizontal",
+                                      variable=self.approx_ratio,
+                                      command=lambda e: self.update_labels())
+        self.approx_scale.grid(row=4, column=1, sticky="ew")
+        self.approx_scale.config(state="disabled")
+        self.approx_ratio_label = ttk.Label(params, text=f"{self.approx_ratio.get():.2f}%")
+        self.approx_ratio_label.grid(row=4, column=2, sticky="w")
+
+        ttk.Label(params, text="Cierre de trazos discontinuos (px)").grid(row=5, column=0, sticky="w")
+        self.kernel_scale = ttk.Scale(params, from_=0, to=21, orient="horizontal",
+                                      variable=self.kernel_shape,
+                                      command=lambda e: self.update_labels())
+        self.kernel_scale.grid(row=5, column=1, sticky="ew")
+        self.kernel_scale.config(state="disabled")
+        self.kernel_shape_label = ttk.Label(params, text="Off")
+        self.kernel_shape_label.grid(row=5, column=2, sticky="w")
+
         # Botones de acción
         actions = ttk.Frame(header)
         actions.grid(row=0, column=4, rowspan=3, sticky="nesw")
         self.reconstruct_button = ttk.Button(
             actions, text="Reconstruir modelo", command=self.reconstruct_async, state="disabled")
-        self.reconstruct_button.pack(fill="x", padx=PADDING * 2, pady=PADDING)
+        self.reconstruct_button.pack(fill="x", padx=PADDING * 2, pady=PADDING + PADDING / 2)
 
         self.export_button = ttk.Button(actions, text="Exportar", command=self.export_obj, state="disabled")
-        self.export_button.pack(fill="x", padx=PADDING * 2, pady=PADDING)
+        self.export_button.pack(fill="x", padx=PADDING * 2, pady=PADDING + PADDING / 2)
 
         self.cancel_button = ttk.Button(actions, text="Cancelar", command=self.cancel_reconstruction, state="disabled")
-        self.cancel_button.pack(fill="x", padx=PADDING * 2, pady=PADDING)
+        self.cancel_button.pack(fill="x", padx=PADDING * 2, pady=PADDING + PADDING / 2)
 
         # Barra de progreso
         self.progress_bar = ttk.Progressbar(actions, mode="indeterminate", orient=tk.HORIZONTAL)
@@ -234,9 +254,16 @@ class Application(TkinterDnD.Tk):
         self.vertex_distance_label.config(text=str(self.vertex_distance.get()))
         self.matching_tolerance_label.config(text=f"{self.matching_tolerance.get():.1f}%")
         self.geometry_tolerance_label.config(text=f"{self.geometry_tolerance.get():.1f}%")
+        self.approx_ratio_label.config(text=f"{self.approx_ratio.get():.2f}%")
+
+        k = int(self.kernel_shape.get())
+        self.kernel_shape_label.config(text=("Off" if k == 0 else f"{k} px"))
 
     def update_params(self):
-        params = [self.noise_scale, self.vertex_scale, self.matching_scale, self.geometry_scale]
+        params = [
+            self.noise_scale, self.vertex_scale, self.matching_scale,
+            self.geometry_scale, self.approx_scale, self.kernel_scale
+        ]
 
         if self.paths_ready():
             for p in params:
@@ -250,13 +277,33 @@ class Application(TkinterDnD.Tk):
         self.vertex_scale.config(to=int(diagonal * 0.05))  # Hasta el 5% de la diagonal
         self.update_labels()
 
-    def apply_sliders(self, path):
+    @staticmethod
+    def get_image_params(path):
         image = cv2.imread(path)
         if image is None:
             return
         diagonal = np.linalg.norm(image.shape[:2])
         area = image.shape[0] * image.shape[1]
-        self.update_dynamic_sliders(area, diagonal)
+        return area, diagonal
+
+    def apply_sliders(self):
+        paths = [self.front_path.get(), self.right_path.get(), self.top_path.get()]
+        params = []
+
+        for path in paths:
+            if os.path.isfile(path):
+                area, diagonal = self.get_image_params(path)
+                if area is not None and diagonal is not None:
+                    params.append((area, diagonal))
+
+        if not params:
+            return
+
+        max_area = max(area for area, _ in params)
+        max_diagonal = max(diagonal for _, diagonal in params)
+
+        self.update_dynamic_sliders(max_area, max_diagonal)
+        self.update_labels()
 
     def add_file(self, file):
         # Formatos de imagen aceptados
@@ -279,11 +326,10 @@ class Application(TkinterDnD.Tk):
             self.last_dir = os.path.dirname(path) or self.last_dir
             self.save_preferences()
 
-            if file is self.front_path:
-                self.apply_sliders(path)
-
             # Habilitar parámetros
             self.update_params()
+            if self.paths_ready():
+                self.apply_sliders()
 
     def split_paths(self, data):
         paths = self.tk.splitlist(data)
@@ -380,21 +426,36 @@ class Application(TkinterDnD.Tk):
         success = False
 
         try:
+            k = int(self.kernel_shape.get())
+            use_edges = k > 0
+            kernel_size = k if k > 0 else 0
+
+            approx_ratio = self.approx_ratio.get() / 100.0
+
             # Detectar los vértices y aristas en cada vista
             front_points_2d, front_edges_2d = get_points_and_edges_from_contours(
                 front_view,
                 noise_threshold=int(self.noise_threshold.get()),
-                vertex_distance=int(self.vertex_distance.get())
+                vertex_distance=int(self.vertex_distance.get()),
+                hidden_edges=use_edges,
+                kernel_shape=kernel_size,
+                approx_ratio=approx_ratio
             )
             left_points_2d, left_edges_2d = get_points_and_edges_from_contours(
                 left_view,
                 noise_threshold=int(self.noise_threshold.get()),
-                vertex_distance=int(self.vertex_distance.get())
+                vertex_distance=int(self.vertex_distance.get()),
+                hidden_edges=use_edges,
+                kernel_shape=kernel_size,
+                approx_ratio=approx_ratio
             )
             top_points_2d, top_edges_2d = get_points_and_edges_from_contours(
                 top_view,
                 noise_threshold=int(self.noise_threshold.get()),
-                vertex_distance=int(self.vertex_distance.get())
+                vertex_distance=int(self.vertex_distance.get()),
+                hidden_edges=use_edges,
+                kernel_shape=kernel_size,
+                approx_ratio=approx_ratio
             )
 
             # Comprobar cancelación de reconstrucción por el usuario
@@ -463,7 +524,7 @@ class Application(TkinterDnD.Tk):
             points_3d = reconstruct_points_3d(plan, elevation, section, tolerance=matching_tolerance)
             if len(points_3d) < 4:
                 self.log("No se han podido reconstruir suficientes puntos 3D para formar una figura.", error=True)
-                self.after(0, lambda: messagebox.showinfo(APP_TITLE, "No hay suficientes puntos 3D."))
+                self.after(0, lambda: messagebox.showwarning(APP_TITLE, "No hay suficientes puntos 3D."))
                 return
 
             # Comprobar cancelación de reconstrucción por el usuario
@@ -472,7 +533,7 @@ class Application(TkinterDnD.Tk):
             edges_3d = reconstruct_edges_3d(points_3d, plan, elevation, section, tolerance=matching_tolerance)
             if len(edges_3d) == 0:
                 self.log("No se han podido reconstruir suficientes aristas 3D para formar una figura.", error=True)
-                self.after(0, lambda: messagebox.showinfo(APP_TITLE, "No se han reconstruido aristas 3D."))
+                self.after(0, lambda: messagebox.showwarning(APP_TITLE, "No se han reconstruido aristas 3D."))
                 return
 
             # Comprobar cancelación de reconstrucción por el usuario
@@ -607,6 +668,10 @@ class Application(TkinterDnD.Tk):
         self.is_model_ready = False
         self.update_buttons()
         self.update_params()
+
+        # Calibrar sliders cuando estén todas las vistas
+        if self.paths_ready():
+            self.apply_sliders()
 
         # Limpiar el canvas
         self.ax_3d.clear()

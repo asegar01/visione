@@ -19,9 +19,10 @@ class Projection:
         self.edges = edges
         self.normal = normal
         self.name = name
+        self.support_edges = edges.copy()
 
     def __repr__(self):
-        return f'Project(\n\t{repr(self.points)},\n\t{repr(self.edges)},\n\t{repr(self.normal)},\n\t{repr(self.name)}\n)'
+        return f'Projection(\n\t{repr(self.points)},\n\t{repr(self.edges)},\n\t{repr(self.normal)},\n\t{repr(self.name)}\n)'
 
 
 def project_cloud_axis(points: np.ndarray, edges: np.ndarray, axis: int, name: str):
@@ -252,22 +253,22 @@ def get_angle(a, b):
     return angle
 
 
-def is_collinear(a, b, angle_tolerance):
+def is_collinear(a, b, collinear_tolerance):
     """
     Comprueba si dos vectores son colineales.
 
     :param a: Primer vector.
     :param b: Segundo vector.
-    :param angle_tolerance: Tolerancia para la comparación en grados.
+    :param collinear_tolerance: Tolerancia para la comparación en grados.
     :return:
         - True si los vectores son colineales.
         - False en caso contrario.
     """
     angle = get_angle(a, b)
-    return (angle <= angle_tolerance) or (abs(angle - 180.0) <= angle_tolerance)
+    return (angle <= collinear_tolerance) or (abs(angle - 180.0) <= collinear_tolerance)
 
 
-def calculate_collinear_edges(proj, angle_tolerance=3.0):
+def calculate_collinear_edges(proj, collinear_tolerance=3.0):
     """
     Calcula y añade las aristas indirectas que existen entre vértices colineales.
 
@@ -275,7 +276,7 @@ def calculate_collinear_edges(proj, angle_tolerance=3.0):
     aristas colineales y los añade al conjunto de aristas de soporte de la proyección.
 
     :param proj: Proyección a procesar.
-    :param angle_tolerance: Tolerancia para la colinealidad en grados.
+    :param collinear_tolerance: Tolerancia para la colinealidad en grados.
     """
     graph = build_projection_graph(proj)
 
@@ -295,6 +296,7 @@ def calculate_collinear_edges(proj, angle_tolerance=3.0):
             direction = direction / n if n > 1e-12 else direction
 
             stack = [v]
+            visited = {u}
 
             while stack:
                 current = stack.pop()
@@ -313,16 +315,16 @@ def calculate_collinear_edges(proj, angle_tolerance=3.0):
                     if np.linalg.norm(direction_next) < 1e-12:
                         continue
 
-                    if is_collinear(direction, direction_next, angle_tolerance) and \
-                            is_collinear(direction, proj.points[w] - proj.points[u], angle_tolerance):
+                    if is_collinear(direction, direction_next, collinear_tolerance) and \
+                            is_collinear(direction, proj.points[w] - proj.points[u], collinear_tolerance):
                         stack.append(w)
 
-    indirect = {tuple(sorted(tuple(edge))) for edge in proj.edges}
-    indirect |= closure
-    proj.indirect_edges = np.array(sorted(indirect), dtype=int)
+    support = {tuple(sorted(tuple(edge))) for edge in proj.edges}
+    support |= closure
+    proj.support_edges = np.array(sorted(support), dtype=int)
 
 
-def reconstruct_edges_3d(points_3d, plan_proj, elevation_proj, section_proj, tolerance=1e-2, angle_tolerance=3.0):
+def reconstruct_edges_3d(points_3d, plan_proj, elevation_proj, section_proj, tolerance=1e-2):
     """
     Reconstruye las aristas del modelo 3D a partir de las proyecciones ortogonales.
 
@@ -337,14 +339,14 @@ def reconstruct_edges_3d(points_3d, plan_proj, elevation_proj, section_proj, tol
     :param angle_tolerance: Tolerancia para la detección de aristas colineales.
     :return: Array de aristas 3D reconstruidos del modelo.
     """
-    # Crear conjuntos de aristas visibles y ocultas para cada vista
+    # Crear conjuntos de aristas visibles e indirectas para cada vista
     plan_visible = {tuple(sorted(edge)) for edge in plan_proj.edges}
     elevation_visible = {tuple(sorted(edge)) for edge in elevation_proj.edges}
     section_visible = {tuple(sorted(edge)) for edge in section_proj.edges}
 
-    plan_indirect = {tuple(sorted(edge)) for edge in getattr(plan_proj, "indirect_edges", plan_proj.edges)}
-    elevation_indirect = {tuple(sorted(edge)) for edge in getattr(elevation_proj, "indirect_edges", elevation_proj.edges)}
-    section_indirect = {tuple(sorted(edge)) for edge in getattr(section_proj, "indirect_edges", section_proj.edges)}
+    plan_support = {tuple(sorted(edge)) for edge in plan_proj.support_edges}
+    elevation_support = {tuple(sorted(edge)) for edge in elevation_proj.support_edges}
+    section_support = {tuple(sorted(edge)) for edge in section_proj.support_edges}
 
     # Mapear puntos 3D a índices 2D en cada vista
     plan_index_map = {}
@@ -406,14 +408,14 @@ def reconstruct_edges_3d(points_3d, plan_proj, elevation_proj, section_proj, tol
             section_is_point = (i_section == j_section)
 
             # Arista indirecta en cada vista
-            plan_is_indirect = plan_edge in plan_indirect
-            elevation_is_indirect = elevation_edge in elevation_indirect
-            section_is_indirect = section_edge in section_indirect
+            plan_is_support = plan_edge in plan_support
+            elevation_is_support = elevation_edge in elevation_support
+            section_is_support = section_edge in section_support
 
             # La vista es compatible si es arista directa, punto o arista indirecta
-            plan_valid = plan_is_point or plan_is_indirect
-            elevation_valid = elevation_is_point or elevation_is_indirect
-            section_valid = section_is_point or section_is_indirect
+            plan_valid = plan_is_point or plan_is_support
+            elevation_valid = elevation_is_point or elevation_is_support
+            section_valid = section_is_point or section_is_support
 
             # Contar las vistas válidas y en las que aparece la arista como visible
             all_valid_views = plan_valid and elevation_valid and section_valid
@@ -609,9 +611,7 @@ def find_cycles(proj: Projection):
     # Construir un grafo no dirigido
     graph = nx.Graph()
     graph.add_nodes_from(range(len(proj.points)))
-
-    edges = getattr(proj, "indirect_edges", proj.edges)
-    graph.add_edges_from([tuple(sorted(edge)) for edge in edges])
+    graph.add_edges_from([tuple(sorted(edge)) for edge in proj.support_edges])
 
     # Encontrar los ciclos
     try:
@@ -813,35 +813,58 @@ def cycles_to_faces(proj: Projection, cycles, points_3d, edges_3d, matching_tole
     faces = []
     unique_faces = set()
 
-    for cycle in cycles:
-        # Generar todas las listas de candidatos para los puntos del ciclo
-        candidates_for_cycle = [candidates[idx_2d] for idx_2d in cycle]
-
-        # Generar todas las combinaciones posibles de caras, utilizando el producto cartesiano
-        for candidate_face in product(*candidates_for_cycle):
-            # Descartar si tiene vértices repetidos
-            if len(set(candidate_face)) != len(candidate_face):
-                continue
-
-            # Validar conectividad
-            if not is_face_connected(candidate_face, unique_edges):
-                continue
+    # Backtracking recursivo
+    def find_valid_faces_recursive(cycle_2d_indices, current_face_3d, depth):
+        # Caso base: cara completa reconstruida
+        if depth == len(cycle_2d_indices):
+            # Validar arista de cierre
+            first_vertex = current_face_3d[0]
+            last_vertex = current_face_3d[-1]
+            if tuple(sorted((first_vertex, last_vertex))) not in unique_edges:
+                return
 
             # Validar coplanaridad
-            if not is_face_coplanar(list(candidate_face), points_3d, geometry_tolerance):
-                continue
+            if not is_face_coplanar(current_face_3d, points_3d, geometry_tolerance):
+                return
 
             # Validar geometría
-            if not is_face_geometry_valid(list(candidate_face), points_3d, geometry_tolerance):
+            if not is_face_geometry_valid(current_face_3d, points_3d, geometry_tolerance):
+                return
+
+            # Añadir la cara si es única
+            key = tuple(sorted(current_face_3d))
+            if key not in unique_faces:
+                oriented_face = fix_face_orientation(current_face_3d, points_3d)
+                faces.append(oriented_face)
+                unique_faces.add(key)
+            return
+
+        # Intentar añadir el siguiente vértice
+        current_vertex_2d_idx = cycle_2d_indices[depth]
+
+        for candidate_3d_idx in candidates[current_vertex_2d_idx]:
+            # Evitar índices repetidos en la misma cara
+            if candidate_3d_idx in current_face_3d:
                 continue
 
-            # Añadir la cara a la lista
-            key = tuple(sorted(candidate_face))
-            if key not in unique_faces:
-                oriented_face = fix_face_orientation(list(candidate_face), points_3d)
-                faces.append(oriented_face)
+            # Si no es el primer vértice, comprobar conectividad con el anterior (poda)
+            if depth > 0:
+                prev_vertex_3d_idx = current_face_3d[-1]
+                edge = tuple(sorted((prev_vertex_3d_idx, candidate_3d_idx)))
 
-                unique_faces.add(key)
+                # Comprobar si la arista existe para seguir o no por esa rama
+                if edge not in unique_edges:
+                    continue
+
+            # Continuar la búsqueda recursiva
+            find_valid_faces_recursive(cycle_2d_indices, current_face_3d + [candidate_3d_idx], depth + 1)
+
+    # Iniciar la búsqueda para cada ciclo
+    for cycle in cycles:
+        if not cycle or len(cycle) < 3:
+            continue
+
+        find_valid_faces_recursive(cycle, [], 0)
 
     return faces
 

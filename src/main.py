@@ -143,7 +143,8 @@ def crop_image(image):
     return image_cropped, x, y
 
 
-def get_points_and_edges_from_contours(image, noise_threshold=100, vertex_distance=15, hidden_edges=False, kernel_shape=6):
+def get_points_and_edges_from_contours(image, noise_threshold=100, vertex_distance=15,
+                                       hidden_edges=False, kernel_shape=0, approx_ratio=0.01):
     """
     Detecta los vértices y aristas de la figura en la imagen a partir de sus contornos.
 
@@ -210,7 +211,7 @@ def get_points_and_edges_from_contours(image, noise_threshold=100, vertex_distan
             continue
 
         # Calcula la longitud del contorno y define la tolerancia
-        epsilon = 0.01 * cv2.arcLength(c, False)
+        epsilon = float(approx_ratio) * cv2.arcLength(c, False)
 
         # Aproximar el contorno a un polígono
         approx = cv2.approxPolyDP(c, epsilon, False)
@@ -413,11 +414,11 @@ def export_obj(path, points, faces):
 def main():
     # Cargar imágenes de vistas
     try:
-        front_view = cv2.imread('examples/complex_2_front_aligned.jpg')
-        left_view = cv2.imread('examples/complex_2_left_aligned.jpg')
-        top_view = cv2.imread('examples/complex_2_top_aligned.jpg')
+        front_view = cv2.imread('../examples/complex_4_front.png')
+        right_view = cv2.imread('../examples/complex_4_right.png')
+        top_view = cv2.imread('../examples/complex_4_top.png')
 
-        if front_view is None or left_view is None or top_view is None:
+        if front_view is None or right_view is None or top_view is None:
             print("Error: No se pudo cargar una o más imágenes. Asegúrate de que las rutas son correctas")
             return
     except Exception as e:
@@ -426,49 +427,49 @@ def main():
 
     # Calibrar cuadrícula en cada vista
     # front_calibrate, front_transform = grid_detection_calibration(front_view)
-    # left_calibrate, left_transform = grid_detection_calibration(left_view)
+    # left_calibrate, left_transform = grid_detection_calibration(right_view)
     # top_calibrate, top_transform = grid_detection_calibration(top_view)
 
     # Detectar los vértices y aristas en cada vista
     front_points_2d, front_edges_2d = get_points_and_edges_from_contours(front_view)
-    left_points_2d, left_edges_2d = get_points_and_edges_from_contours(left_view)
+    right_points_2d, right_edges_2d = get_points_and_edges_from_contours(right_view)
     top_points_2d, top_edges_2d = get_points_and_edges_from_contours(top_view)
 
     # Corregir ortogonalidad de las vistas
     front_points_2d = align_view_auto(front_points_2d, front_edges_2d)
-    left_points_2d = align_view_auto(left_points_2d, left_edges_2d)
+    right_points_2d = align_view_auto(right_points_2d, right_edges_2d)
     top_points_2d = align_view_auto(top_points_2d, top_edges_2d)
 
     # Invertir el eje vertical del modelo
     if len(front_points_2d) > 0:
         front_points_2d[:, 1] = front_view.shape[0] - front_points_2d[:, 1]
 
-    if len(left_points_2d) > 0:
-        left_points_2d[:, 1] = left_view.shape[0] - left_points_2d[:, 1]
+    if len(right_points_2d) > 0:
+        right_points_2d[:, 1] = right_view.shape[0] - right_points_2d[:, 1]
 
     if len(top_points_2d) > 0:
         top_points_2d[:, 1] = top_view.shape[0] - top_points_2d[:, 1]
 
     # Normalizar y escalar las vistas
-    front_points_2d, left_points_2d, top_points_2d = normalize_and_scale_views(
-        front_points_2d, left_points_2d, top_points_2d
+    front_points_2d, right_points_2d, top_points_2d = normalize_and_scale_views(
+        front_points_2d, right_points_2d, top_points_2d
     )
 
     show_views(
         "Vistas normalizadas",
         front_points_2d, front_edges_2d,
-        left_points_2d, left_edges_2d,
+        right_points_2d, right_edges_2d,
         top_points_2d, top_edges_2d
     )
 
     # Intercambiar coordenadas del perfil
-    if len(left_points_2d) > 0:
-        left_points_2d = left_points_2d[:, [1, 0]]
+    if len(right_points_2d) > 0:
+        right_points_2d = right_points_2d[:, [1, 0]]
 
     # Crear objetos de proyección 2D
-    elevation = Projection(front_points_2d, front_edges_2d, np.array([0, 0, 1]), 'elevation')
-    section = Projection(left_points_2d, left_edges_2d, np.array([1, 0, 0]), 'section')
     plan = Projection(top_points_2d, top_edges_2d, np.array([0, 1, 0]), 'plan')
+    elevation = Projection(front_points_2d, front_edges_2d, np.array([0, 0, 1]), 'elevation')
+    section = Projection(right_points_2d, right_edges_2d, np.array([1, 0, 0]), 'section')
 
     # Construir soporte colineal en cada vista
     calculate_collinear_edges(plan)
@@ -480,7 +481,7 @@ def main():
         print("Inconsistencia en la conectividad de las proyecciones.")
         return
 
-    scale = max(get_view_scale(front_points_2d), get_view_scale(left_points_2d), get_view_scale(top_points_2d))
+    scale = max(get_view_scale(front_points_2d), get_view_scale(right_points_2d), get_view_scale(top_points_2d))
 
     matching_tolerance = scale * 0.01
     geometry_tolerance = scale * 0.01
@@ -537,7 +538,7 @@ def main():
     plot_3d_mesh(points_3d_mat, faces)
 
     # Exportar a formato .obj
-    export_obj("output/model.obj", points_3d, faces)
+    export_obj("../output/model.obj", points_3d, faces)
 
 
 if __name__ == '__main__':
