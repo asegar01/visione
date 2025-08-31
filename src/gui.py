@@ -33,7 +33,8 @@ from vistas import (
     find_cycles,
     cycles_to_faces,
     calculate_collinear_edges,
-    align_view_auto
+    align_view_auto,
+    filter_invalid_vertices
 )
 
 APP_TITLE = "visione"
@@ -74,8 +75,8 @@ class Application(TkinterDnD.Tk):
 
         self.noise_threshold = tk.IntVar(value=100)
         self.vertex_distance = tk.IntVar(value=15)
-        self.matching_tolerance = tk.DoubleVar(value=5.0)
-        self.geometry_tolerance = tk.DoubleVar(value=3.0)
+        self.matching_tolerance = tk.DoubleVar(value=2.0)
+        self.geometry_tolerance = tk.DoubleVar(value=1.5)
         self.kernel_shape = tk.IntVar(value=0)
         self.approx_ratio = tk.DoubleVar(value=1.0)
 
@@ -186,7 +187,7 @@ class Application(TkinterDnD.Tk):
         self.approx_ratio_label.grid(row=4, column=2, sticky="w")
 
         ttk.Label(params, text="Cierre de trazos discontinuos (px)").grid(row=5, column=0, sticky="w")
-        self.kernel_scale = ttk.Scale(params, from_=0, to=21, orient="horizontal",
+        self.kernel_scale = ttk.Scale(params, from_=0, to=35, orient="horizontal",
                                       variable=self.kernel_shape,
                                       command=lambda e: self.update_labels())
         self.kernel_scale.grid(row=5, column=1, sticky="ew")
@@ -273,8 +274,8 @@ class Application(TkinterDnD.Tk):
                 p.config(state="disabled")
 
     def update_dynamic_sliders(self, area, diagonal):
-        self.noise_scale.config(to=int(area * 0.001))  # Hasta el 0.1% del área
-        self.vertex_scale.config(to=int(diagonal * 0.05))  # Hasta el 5% de la diagonal
+        self.noise_scale.config(to=int(area * 0.002))  # Hasta el 0.2% del área
+        self.vertex_scale.config(to=int(diagonal * 0.1))  # Hasta el 10% de la diagonal
         self.update_labels()
 
     @staticmethod
@@ -460,6 +461,8 @@ class Application(TkinterDnD.Tk):
 
             # Comprobar cancelación de reconstrucción por el usuario
             self.check_finish_reconstruction()
+            if self.cancel_event.is_set():
+                return
 
             # Corregir ortogonalidad de las vistas
             front_points_2d = align_view_auto(front_points_2d, front_edges_2d)
@@ -494,6 +497,8 @@ class Application(TkinterDnD.Tk):
 
             # Comprobar cancelación de reconstrucción por el usuario
             self.check_finish_reconstruction()
+            if self.cancel_event.is_set():
+                return
 
             # Crear objetos de proyección 2D
             elevation = Projection(front_points_2d, front_edges_2d, np.array([0, 0, 1]), 'elevation')
@@ -529,6 +534,8 @@ class Application(TkinterDnD.Tk):
 
             # Comprobar cancelación de reconstrucción por el usuario
             self.check_finish_reconstruction()
+            if self.cancel_event.is_set():
+                return
 
             edges_3d = reconstruct_edges_3d(points_3d, plan, elevation, section, tolerance=matching_tolerance)
             if len(edges_3d) == 0:
@@ -536,8 +543,13 @@ class Application(TkinterDnD.Tk):
                 self.after(0, lambda: messagebox.showwarning(APP_TITLE, "No se han reconstruido aristas 3D."))
                 return
 
+            # Filtrar vértices
+            points_3d, edges_3d = filter_invalid_vertices(points_3d, edges_3d)
+
             # Comprobar cancelación de reconstrucción por el usuario
             self.check_finish_reconstruction()
+            if self.cancel_event.is_set():
+                return
 
             # Encontrar ciclos
             plan_cycles = find_cycles(plan)
@@ -546,6 +558,8 @@ class Application(TkinterDnD.Tk):
 
             # Comprobar cancelación de reconstrucción por el usuario
             self.check_finish_reconstruction()
+            if self.cancel_event.is_set():
+                return
 
             # Reconstruir caras
             all_faces = []
@@ -715,8 +729,9 @@ class Application(TkinterDnD.Tk):
             pass
 
     def on_close(self):
-        if self.is_working:
-            self.cancel_reconstruction()
+        if self.is_working and self.reconstruct_thread:
+            self.cancel_event.set()
+            self.reconstruct_thread.join()
 
         # Cerrar la aplicación
         sys.exit(0)

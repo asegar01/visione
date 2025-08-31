@@ -3,12 +3,15 @@ import numpy as np
 import open3d
 import math
 import cv2
+import time
 
 from skimage import morphology
 from skimage.util import img_as_ubyte
 
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
+
+from timer import Timer
 
 from vistas import (
     Projection,
@@ -20,7 +23,8 @@ from vistas import (
     find_cycles,
     cycles_to_faces,
     calculate_collinear_edges,
-    align_view_auto
+    align_view_auto,
+    filter_invalid_vertices
 )
 
 
@@ -414,9 +418,9 @@ def export_obj(path, points, faces):
 def main():
     # Cargar imágenes de vistas
     try:
-        front_view = cv2.imread('../examples/complex_4_front.png')
-        right_view = cv2.imread('../examples/complex_4_right.png')
-        top_view = cv2.imread('../examples/complex_4_top.png')
+        front_view = cv2.imread('../examples/complex_5_front.png')
+        right_view = cv2.imread('../examples/complex_5_right.png')
+        top_view = cv2.imread('../examples/complex_5_top.png')
 
         if front_view is None or right_view is None or top_view is None:
             print("Error: No se pudo cargar una o más imágenes. Asegúrate de que las rutas son correctas")
@@ -430,30 +434,35 @@ def main():
     # left_calibrate, left_transform = grid_detection_calibration(right_view)
     # top_calibrate, top_transform = grid_detection_calibration(top_view)
 
+    # Almacenar tiempos de ejecución
+    times = {}
+
     # Detectar los vértices y aristas en cada vista
-    front_points_2d, front_edges_2d = get_points_and_edges_from_contours(front_view)
-    right_points_2d, right_edges_2d = get_points_and_edges_from_contours(right_view)
-    top_points_2d, top_edges_2d = get_points_and_edges_from_contours(top_view)
+    with Timer("1. Extracción 2D", times):
+        front_points_2d, front_edges_2d = get_points_and_edges_from_contours(front_view)
+        right_points_2d, right_edges_2d = get_points_and_edges_from_contours(right_view)
+        top_points_2d, top_edges_2d = get_points_and_edges_from_contours(top_view)
 
     # Corregir ortogonalidad de las vistas
-    front_points_2d = align_view_auto(front_points_2d, front_edges_2d)
-    right_points_2d = align_view_auto(right_points_2d, right_edges_2d)
-    top_points_2d = align_view_auto(top_points_2d, top_edges_2d)
+    with Timer("2. Alineación y normalización", times):
+        front_points_2d = align_view_auto(front_points_2d, front_edges_2d)
+        right_points_2d = align_view_auto(right_points_2d, right_edges_2d)
+        top_points_2d = align_view_auto(top_points_2d, top_edges_2d)
 
-    # Invertir el eje vertical del modelo
-    if len(front_points_2d) > 0:
-        front_points_2d[:, 1] = front_view.shape[0] - front_points_2d[:, 1]
+        # Invertir el eje vertical del modelo
+        if len(front_points_2d) > 0:
+            front_points_2d[:, 1] = front_view.shape[0] - front_points_2d[:, 1]
 
-    if len(right_points_2d) > 0:
-        right_points_2d[:, 1] = right_view.shape[0] - right_points_2d[:, 1]
+        if len(right_points_2d) > 0:
+            right_points_2d[:, 1] = right_view.shape[0] - right_points_2d[:, 1]
 
-    if len(top_points_2d) > 0:
-        top_points_2d[:, 1] = top_view.shape[0] - top_points_2d[:, 1]
+        if len(top_points_2d) > 0:
+            top_points_2d[:, 1] = top_view.shape[0] - top_points_2d[:, 1]
 
-    # Normalizar y escalar las vistas
-    front_points_2d, right_points_2d, top_points_2d = normalize_and_scale_views(
-        front_points_2d, right_points_2d, top_points_2d
-    )
+        # Normalizar y escalar las vistas
+        front_points_2d, right_points_2d, top_points_2d = normalize_and_scale_views(
+            front_points_2d, right_points_2d, top_points_2d
+        )
 
     show_views(
         "Vistas normalizadas",
@@ -471,64 +480,67 @@ def main():
     elevation = Projection(front_points_2d, front_edges_2d, np.array([0, 0, 1]), 'elevation')
     section = Projection(right_points_2d, right_edges_2d, np.array([1, 0, 0]), 'section')
 
-    # Construir soporte colineal en cada vista
-    calculate_collinear_edges(plan)
-    calculate_collinear_edges(elevation)
-    calculate_collinear_edges(section)
-
     # Verificar la conectividad de cada proyección
     if not check_projection_connectivity((plan, elevation, section)):
         print("Inconsistencia en la conectividad de las proyecciones.")
         return
 
     scale = max(get_view_scale(front_points_2d), get_view_scale(right_points_2d), get_view_scale(top_points_2d))
-
-    matching_tolerance = scale * 0.01
-    geometry_tolerance = scale * 0.01
-
-    print(f"Tolerancia de emparejamiento: {matching_tolerance:.2f}")
-    print(f"Tolerancia geométrica: {geometry_tolerance:.2f}")
+    matching_tolerance = scale * 0.02
+    geometry_tolerance = scale * 0.015
 
     # Reconstruir el modelo 3D a partir de las proyecciones ortogonales
-    points_3d = reconstruct_points_3d(plan, elevation, section, tolerance=matching_tolerance)
+    with Timer("3. Reconstrucción de puntos 3D", times):
+        points_3d = reconstruct_points_3d(plan, elevation, section, tolerance=matching_tolerance)
     if len(points_3d) < 4:
         print("No se han podido reconstruir suficientes puntos 3D para formar una figura.")
         return
 
-    edges_3d = reconstruct_edges_3d(points_3d, plan, elevation, section, tolerance=matching_tolerance)
-    if len(edges_3d) == 0:
-        print("No se han podido reconstruir suficientes aristas 3D para formar una figura.")
-        return
+    with Timer("4. Reconstrucción de aristas 3D", times):
+        # Construir soporte colineal en cada vista
+        calculate_collinear_edges(plan)
+        calculate_collinear_edges(elevation)
+        calculate_collinear_edges(section)
+
+        # Reconstruir aristas 3D
+        edges_3d = reconstruct_edges_3d(points_3d, plan, elevation, section, tolerance=matching_tolerance)
+        if len(edges_3d) == 0:
+            print("No se han podido reconstruir suficientes aristas 3D para formar una figura.")
+            return
+
+        # Filtrar vértices
+        points_3d, edges_3d = filter_invalid_vertices(points_3d, edges_3d)
 
     # Encontrar ciclos
-    plan_cycles = find_cycles(plan)
-    elevation_cycles = find_cycles(elevation)
-    section_cycles = find_cycles(section)
+    with Timer("5. Reconstrucción de caras 3D", times):
+        plan_cycles = find_cycles(plan)
+        elevation_cycles = find_cycles(elevation)
+        section_cycles = find_cycles(section)
 
-    # Reconstruir caras
-    all_faces = []
-    all_faces.extend(
-        cycles_to_faces(plan, plan_cycles, points_3d, edges_3d, matching_tolerance, geometry_tolerance))
-    all_faces.extend(
-        cycles_to_faces(elevation, elevation_cycles, points_3d, edges_3d, matching_tolerance, geometry_tolerance))
-    all_faces.extend(
-        cycles_to_faces(section, section_cycles, points_3d, edges_3d, matching_tolerance, geometry_tolerance))
+        # Reconstruir caras
+        all_faces = []
+        all_faces.extend(
+            cycles_to_faces(plan, plan_cycles, points_3d, edges_3d, matching_tolerance, geometry_tolerance))
+        all_faces.extend(
+            cycles_to_faces(elevation, elevation_cycles, points_3d, edges_3d, matching_tolerance, geometry_tolerance))
+        all_faces.extend(
+            cycles_to_faces(section, section_cycles, points_3d, edges_3d, matching_tolerance, geometry_tolerance))
+
+        unique_faces = set()
+        faces = []
+        for face in all_faces:
+            key = tuple(sorted(face))
+            if key not in unique_faces:
+                faces.append(face)
+                unique_faces.add(key)
+
+        if not faces:
+            print("No se pudo reconstruir ninguna cara.")
+            return
 
     # Comprobar la consistencia global del modelo 3D reconstruido
     if not check_model_consistency(points_3d, edges_3d):
         print("Inconsistencia global en el modelo 3D reconstruido.")
-        return
-
-    unique_faces = set()
-    faces = []
-    for face in all_faces:
-        key = tuple(sorted(face))
-        if key not in unique_faces:
-            faces.append(face)
-            unique_faces.add(key)
-
-    if not faces:
-        print("No se pudo reconstruir ninguna cara.")
         return
 
     # Intercambiar ejes para visualización
@@ -539,6 +551,12 @@ def main():
 
     # Exportar a formato .obj
     export_obj("../output/model.obj", points_3d, faces)
+
+    # Calcular tiempo total de reconstrucción
+    total_time = 0
+    for name, t in times.items():
+        total_time += t
+    print(f"[Tiempo total]: {total_time:.4f} segundos")
 
 
 if __name__ == '__main__':

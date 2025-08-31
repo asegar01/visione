@@ -869,7 +869,7 @@ def cycles_to_faces(proj: Projection, cycles, points_3d, edges_3d, matching_tole
     return faces
 
 
-def filter_invalid_vertices(points_3d, edges_3d, min_degree=2):
+def filter_invalid_vertices(points_3d, edges_3d, min_degree=3, collinear_tolerance=1.0):
     """
     Filtra los vértices que no cumplen con un grado mínimo de conectividad.
 
@@ -883,15 +883,41 @@ def filter_invalid_vertices(points_3d, edges_3d, min_degree=2):
     if len(points_3d) <= min_degree or len(edges_3d) == 0:
         return points_3d, edges_3d
 
-    # Calcular grado de cada vértice
-    degrees = np.zeros(len(points_3d), dtype=int)
+    # Crear grafo a partir de vértices y aristas
+    g = Graph()
+    for i in range(len(points_3d)):
+        g.add_vertex(i)
     for u, v in edges_3d:
-        degrees[u] += 1
-        degrees[v] += 1
+        g.add_edge(u, v)
 
-    # Identificar los índices válidos.
-    # Si eliminamos el vértice 2, el antiguo vértice 3 será ahora el 2 -> {0:0, 1:1, 3:2, 4:3}
-    valid_indices = sorted([i for i, deg in enumerate(degrees) if deg >= min_degree])
+    valid_indices = []
+    for i in range(len(points_3d)):
+        v = g.adj.get(i)
+        if not v:
+            continue
+
+        # Obtener los vecinos del vértice
+        neighbors = [neighbor.name for neighbor in v.neighbors()]
+        if len(neighbors) < min_degree:
+            continue
+
+        # Calcular el grado de cada vértice
+        degree = 0
+        if len(neighbors) > 0:
+            # Obtener direcciones de cada arista
+            vectors = [points_3d[n] - points_3d[i] for n in neighbors]
+            remaining = list(range(len(vectors)))
+
+            while remaining:
+                degree += 1
+                idx = remaining.pop(0)
+                vector = vectors[idx]
+
+                # Conservar únicamente vectores no colineales
+                remaining = [idx for idx in remaining if not is_collinear(vector, vectors[idx], collinear_tolerance)]
+
+        if degree >= min_degree:
+            valid_indices.append(i)
 
     if len(valid_indices) == len(points_3d):
         return points_3d, edges_3d
