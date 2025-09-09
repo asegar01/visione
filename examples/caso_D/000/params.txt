@@ -1,0 +1,2 @@
+distancia de fusión de vértices --> 50px
+aproximación de contorno --> 0.8%

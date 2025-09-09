@@ -81,7 +81,7 @@ class Application(TkinterDnD.Tk):
         self.approx_ratio = tk.DoubleVar(value=1.0)
 
         self.front_points_2d, self.front_edges_2d = np.array([]), np.array([])
-        self.left_points_2d, self.left_edges_2d = np.array([]), np.array([])
+        self.right_points_2d, self.right_edges_2d = np.array([]), np.array([])
         self.top_points_2d, self.top_edges_2d = np.array([]), np.array([])
 
         self.points_3d = np.array([])
@@ -121,14 +121,14 @@ class Application(TkinterDnD.Tk):
 
         ttk.Button(header, text="Cargar perfil",
                    command=lambda: self.add_file(self.right_path)).grid(row=2, column=0, padx=PADDING, sticky="ew")
-        self.left_entry = ttk.Entry(header, textvariable=self.right_path)
-        self.left_entry.grid(row=2, column=1, padx=10, sticky="ew")
+        self.right_entry = ttk.Entry(header, textvariable=self.right_path)
+        self.right_entry.grid(row=2, column=1, padx=10, sticky="ew")
 
         # Permitir drag-and-drop de una vista
         for widget, target in [
             (self.front_entry, self.front_path),
             (self.top_entry, self.top_path),
-            (self.left_entry, self.right_path)
+            (self.right_entry, self.right_path)
         ]:
             widget.drop_target_register(DND_FILES)
             widget.dnd_bind('<<Drop>>', lambda e, t=target: self.on_drop_file(e, target=t))
@@ -416,9 +416,9 @@ class Application(TkinterDnD.Tk):
 
         # Cargar imágenes de vistas
         front_view = cv2.imread(self.front_path.get())
-        left_view = cv2.imread(self.right_path.get())
+        right_view = cv2.imread(self.right_path.get())
         top_view = cv2.imread(self.top_path.get())
-        if front_view is None or left_view is None or top_view is None:
+        if front_view is None or right_view is None or top_view is None:
             self.log("Error al leer una o más imágenes. Comprueba el formato.", error=True)
             self.after(0, lambda: messagebox.showerror(APP_TITLE, "No se pudo leer alguna imagen."))
             self.finish_reconstruction(False)
@@ -442,8 +442,8 @@ class Application(TkinterDnD.Tk):
                 kernel_shape=kernel_size,
                 approx_ratio=approx_ratio
             )
-            left_points_2d, left_edges_2d = get_points_and_edges_from_contours(
-                left_view,
+            right_points_2d, right_edges_2d = get_points_and_edges_from_contours(
+                right_view,
                 noise_threshold=int(self.noise_threshold.get()),
                 vertex_distance=int(self.vertex_distance.get()),
                 hidden_edges=use_edges,
@@ -466,34 +466,34 @@ class Application(TkinterDnD.Tk):
 
             # Corregir ortogonalidad de las vistas
             front_points_2d = align_view_auto(front_points_2d, front_edges_2d)
-            left_points_2d = align_view_auto(left_points_2d, left_edges_2d)
+            right_points_2d = align_view_auto(right_points_2d, right_edges_2d)
             top_points_2d = align_view_auto(top_points_2d, top_edges_2d)
 
             # Invertir el eje vertical del modelo
             if len(front_points_2d) > 0:
                 front_points_2d[:, 1] = front_view.shape[0] - front_points_2d[:, 1]
 
-            if len(left_points_2d) > 0:
-                left_points_2d[:, 1] = left_view.shape[0] - left_points_2d[:, 1]
+            if len(right_points_2d) > 0:
+                right_points_2d[:, 1] = right_view.shape[0] - right_points_2d[:, 1]
 
             if len(top_points_2d) > 0:
                 top_points_2d[:, 1] = top_view.shape[0] - top_points_2d[:, 1]
 
             # Normalizar y escalar las vistas
-            front_points_2d, left_points_2d, top_points_2d = normalize_and_scale_views(
-                front_points_2d, left_points_2d, top_points_2d
+            front_points_2d, right_points_2d, top_points_2d = normalize_and_scale_views(
+                front_points_2d, right_points_2d, top_points_2d
             )
 
             self.front_points_2d, self.front_edges_2d = front_points_2d, front_edges_2d
-            self.left_points_2d, self.left_edges_2d = left_points_2d, left_edges_2d
+            self.right_points_2d, self.right_edges_2d = right_points_2d, right_edges_2d
             self.top_points_2d, self.top_edges_2d = top_points_2d, top_edges_2d
 
             # Mostrar vistas 2D
             self.draw_views()
 
             # Intercambiar coordenadas del perfil
-            if len(left_points_2d) > 0:
-                left_points_2d = left_points_2d[:, [1, 0]]
+            if len(right_points_2d) > 0:
+                right_points_2d = right_points_2d[:, [1, 0]]
 
             # Comprobar cancelación de reconstrucción por el usuario
             self.check_finish_reconstruction()
@@ -502,10 +502,10 @@ class Application(TkinterDnD.Tk):
 
             # Crear objetos de proyección 2D
             elevation = Projection(front_points_2d, front_edges_2d, np.array([0, 0, 1]), 'elevation')
-            section = Projection(left_points_2d, left_edges_2d, np.array([1, 0, 0]), 'section')
+            section = Projection(right_points_2d, right_edges_2d, np.array([1, 0, 0]), 'section')
             plan = Projection(top_points_2d, top_edges_2d, np.array([0, 1, 0]), 'plan')
 
-            # Construir soporte colineal en cada vista
+            # Construir aristas auxiliares en cada vista
             calculate_collinear_edges(plan)
             calculate_collinear_edges(elevation)
             calculate_collinear_edges(section)
@@ -518,7 +518,7 @@ class Application(TkinterDnD.Tk):
                 return
 
             # Calcular tolerancias en función de la diagonal del alzado
-            scale = max(get_view_scale(front_points_2d), get_view_scale(left_points_2d), get_view_scale(top_points_2d))
+            scale = max(get_view_scale(front_points_2d), get_view_scale(right_points_2d), get_view_scale(top_points_2d))
 
             matching_tolerance = scale * (self.matching_tolerance.get() / 100.0)
             geometry_tolerance = scale * (self.geometry_tolerance.get() / 100.0)
@@ -608,7 +608,7 @@ class Application(TkinterDnD.Tk):
         data = [
             ("Alzado", self.front_points_2d, self.front_edges_2d),
             ("Planta", self.top_points_2d, self.top_edges_2d),
-            ("Perfil", self.left_points_2d, self.left_edges_2d)
+            ("Perfil", self.right_points_2d, self.right_edges_2d)
         ]
 
         for ax, (title, points, edges) in zip(axes, data):
@@ -618,10 +618,10 @@ class Application(TkinterDnD.Tk):
             ax.grid(True)
 
             if len(points) > 0:
-                ax.scatter(points[:, 0], points[:, 1], c='#0b1220')
+                ax.scatter(points[:, 0], points[:, 1], c='#0b1220', s=15, zorder=2)
                 if len(edges) > 0:
                     lines = [(points[u], points[v]) for u, v in edges]
-                    ax.add_collection(LineCollection(lines, colors='#60a5fa'))
+                    ax.add_collection(LineCollection(lines, colors='#60a5fa', zorder=1))
 
         self.canvas_2d.draw_idle()
 

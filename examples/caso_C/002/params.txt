@@ -1,0 +1,4 @@
+distancia para fusionar vértices -->  40px
+tolerancia de emparejamiento --> 2.5%
+aproximación de contorno ---> 0.50%
+cierre de trazos discontinuos --> 13px

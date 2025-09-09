@@ -3,10 +3,8 @@ import math
 
 import matplotlib.pyplot as plt
 import matplotlib.collections as mc
-from scipy.spatial import Delaunay, ConvexHull
-from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-from itertools import product
 import networkx as nx
+from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
 from graph import Graph, Vertex
 
@@ -19,7 +17,7 @@ class Projection:
         self.edges = edges
         self.normal = normal
         self.name = name
-        self.support_edges = edges.copy()
+        self.auxiliary_edges = edges.copy()
 
     def __repr__(self):
         return f'Projection(\n\t{repr(self.points)},\n\t{repr(self.edges)},\n\t{repr(self.normal)},\n\t{repr(self.name)}\n)'
@@ -206,7 +204,7 @@ def reconstruct_points_3d(plan_proj, elevation_proj, section_proj, tolerance=1e-
         ]
 
         if not candidates_plan or not candidates_section:
-            print(f"No se encontraron candidatos para el punto alzado {i}: ({x_elevation}, {y_elevation})")
+            # print(f"No se encontraron candidatos para el punto alzado {i}: ({x_elevation}, {y_elevation})")
             continue
 
         # Obtener la coordenada Z de ambas proyecciones
@@ -273,7 +271,7 @@ def calculate_collinear_edges(proj, collinear_tolerance=3.0):
     Calcula y añade las aristas indirectas que existen entre vértices colineales.
 
     Esta función encuentra todos los pares de vértices (u, v) conectados por un camino de
-    aristas colineales y los añade al conjunto de aristas de soporte de la proyección.
+    aristas colineales y los añade al conjunto de aristas auxiliares de la proyección.
 
     :param proj: Proyección a procesar.
     :param collinear_tolerance: Tolerancia para la colinealidad en grados.
@@ -319,9 +317,9 @@ def calculate_collinear_edges(proj, collinear_tolerance=3.0):
                             is_collinear(direction, proj.points[w] - proj.points[u], collinear_tolerance):
                         stack.append(w)
 
-    support = {tuple(sorted(tuple(edge))) for edge in proj.edges}
-    support |= closure
-    proj.support_edges = np.array(sorted(support), dtype=int)
+    auxiliary = {tuple(sorted(tuple(edge))) for edge in proj.edges}
+    auxiliary |= closure
+    proj.auxiliary_edges = np.array(sorted(auxiliary), dtype=int)
 
 
 def reconstruct_edges_3d(points_3d, plan_proj, elevation_proj, section_proj, tolerance=1e-2):
@@ -344,9 +342,9 @@ def reconstruct_edges_3d(points_3d, plan_proj, elevation_proj, section_proj, tol
     elevation_visible = {tuple(sorted(edge)) for edge in elevation_proj.edges}
     section_visible = {tuple(sorted(edge)) for edge in section_proj.edges}
 
-    plan_support = {tuple(sorted(edge)) for edge in plan_proj.support_edges}
-    elevation_support = {tuple(sorted(edge)) for edge in elevation_proj.support_edges}
-    section_support = {tuple(sorted(edge)) for edge in section_proj.support_edges}
+    plan_auxiliary = {tuple(sorted(edge)) for edge in plan_proj.auxiliary_edges}
+    elevation_auxiliary = {tuple(sorted(edge)) for edge in elevation_proj.auxiliary_edges}
+    section_auxiliary = {tuple(sorted(edge)) for edge in section_proj.auxiliary_edges}
 
     # Mapear puntos 3D a índices 2D en cada vista
     plan_index_map = {}
@@ -408,14 +406,14 @@ def reconstruct_edges_3d(points_3d, plan_proj, elevation_proj, section_proj, tol
             section_is_point = (i_section == j_section)
 
             # Arista indirecta en cada vista
-            plan_is_support = plan_edge in plan_support
-            elevation_is_support = elevation_edge in elevation_support
-            section_is_support = section_edge in section_support
+            plan_is_auxiliar = plan_edge in plan_auxiliary
+            elevation_is_auxiliar = elevation_edge in elevation_auxiliary
+            section_is_auxiliar = section_edge in section_auxiliary
 
             # La vista es compatible si es arista directa, punto o arista indirecta
-            plan_valid = plan_is_point or plan_is_support
-            elevation_valid = elevation_is_point or elevation_is_support
-            section_valid = section_is_point or section_is_support
+            plan_valid = plan_is_point or plan_is_auxiliar
+            elevation_valid = elevation_is_point or elevation_is_auxiliar
+            section_valid = section_is_point or section_is_auxiliar
 
             # Contar las vistas válidas y en las que aparece la arista como visible
             all_valid_views = plan_valid and elevation_valid and section_valid
@@ -456,7 +454,7 @@ def check_projection_connectivity(projections):
         # Verificar si existe algún punto con una única conexión (grado 1)
         for idx, deg in enumerate(degrees):
             if deg == 1:
-                print(f"Inconsistencia en {proj.name}. El punto {proj.points[idx]} tiene una única conexión.")
+                # print(f"Inconsistencia en {proj.name}. El punto {proj.points[idx]} tiene una única conexión.")
                 return False
     return True
 
@@ -488,7 +486,7 @@ def check_model_consistency(points, edges):
 
     for i, deg in enumerate(degrees):
         if deg < 3:
-            print(f"Inconsistencia global en el vértice {i} con coordenadas {points[i]} [grado {deg}]")
+            # print(f"Inconsistencia global en el vértice {i} con coordenadas {points[i]} [grado {deg}]")
             return False
     return True
 
@@ -549,7 +547,7 @@ def check_projection_consistency(plan_proj, elevation_proj, section_proj, tolera
         return True
 
     except Exception as e:
-        print(f"Error al verificar consistencia: {e}")
+        # print(f"Error al verificar consistencia: {e}")
         return False
 
 
@@ -611,14 +609,14 @@ def find_cycles(proj: Projection):
     # Construir un grafo no dirigido
     graph = nx.Graph()
     graph.add_nodes_from(range(len(proj.points)))
-    graph.add_edges_from([tuple(sorted(edge)) for edge in proj.support_edges])
+    graph.add_edges_from([tuple(sorted(edge)) for edge in proj.auxiliary_edges])
 
     # Encontrar los ciclos
     try:
         cycles = nx.chordless_cycles(graph)
         return cycles
     except nx.NetworkXError as e:
-        print(f"Error al encontrar los ciclos del grafo en la vista {proj.name}: {e}")
+        # print(f"Error al encontrar los ciclos del grafo en la vista {proj.name}: {e}")
         return []
 
 
@@ -726,7 +724,7 @@ def is_face_coplanar(face, points, tolerance=1e-2):
     return True
 
 
-def is_face_geometry_valid(face, points, tolerance=1e-2):
+def is_face_geometry_valid(face, points, tolerance=5.0):
     """
     Valida la geometría de la cara mediante la suma de ángulos.
 

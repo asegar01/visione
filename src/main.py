@@ -1,17 +1,12 @@
-from PIL import Image
 import numpy as np
-import open3d
 import math
 import cv2
-import time
 
 from skimage import morphology
 from skimage.util import img_as_ubyte
 
 import matplotlib.pyplot as plt
 from matplotlib.collections import LineCollection
-
-from timer import Timer
 
 from vistas import (
     Projection,
@@ -26,6 +21,8 @@ from vistas import (
     align_view_auto,
     filter_invalid_vertices
 )
+
+from timer import Timer
 
 
 def grid_detection_calibration(image, min_line_length=100, max_line_gap=10):
@@ -418,9 +415,9 @@ def export_obj(path, points, faces):
 def main():
     # Cargar imágenes de vistas
     try:
-        front_view = cv2.imread('../examples/complex_5_front.png')
-        right_view = cv2.imread('../examples/complex_5_right.png')
-        top_view = cv2.imread('../examples/complex_5_top.png')
+        front_view = cv2.imread('../examples/caso_B/000/input/front.png')
+        right_view = cv2.imread('../examples/caso_B/000/input/right.png')
+        top_view = cv2.imread('../examples/caso_B/000/input/top.png')
 
         if front_view is None or right_view is None or top_view is None:
             print("Error: No se pudo cargar una o más imágenes. Asegúrate de que las rutas son correctas")
@@ -497,7 +494,7 @@ def main():
         return
 
     with Timer("4. Reconstrucción de aristas 3D", times):
-        # Construir soporte colineal en cada vista
+        # Construir aristas auxiliares en cada vista
         calculate_collinear_edges(plan)
         calculate_collinear_edges(elevation)
         calculate_collinear_edges(section)
@@ -550,7 +547,7 @@ def main():
     plot_3d_mesh(points_3d_mat, faces)
 
     # Exportar a formato .obj
-    export_obj("../output/model.obj", points_3d, faces)
+    export_obj("../examples/caso_B/000/output/model.obj", points_3d, faces)
 
     # Calcular tiempo total de reconstrucción
     total_time = 0

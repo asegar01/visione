@@ -1,0 +1,3 @@
+tolerancia de emparejamiento --> 2.5%
+aproximación de contorno --> 0.92%
+cierre de trazos discontinuos --> 11px
